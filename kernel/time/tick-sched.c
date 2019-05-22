@@ -197,7 +197,7 @@ static bool can_stop_full_tick(void)
 	return true;
 }
 
-static void tick_nohz_restart_sched_tick(struct tick_sched *ts, ktime_t now);
+static void tick_nohz_restart_sched_tick(struct tick_sched *ts, ktime_t now, int active);
 
 /*
  * Re-evaluate the need for the tick on the current CPU
@@ -210,7 +210,7 @@ void __tick_nohz_full_check(void)
 	if (tick_nohz_full_cpu(smp_processor_id())) {
 		if (ts->tick_stopped && !is_idle_task(current)) {
 			if (!can_stop_full_tick())
-				tick_nohz_restart_sched_tick(ts, ktime_get());
+				tick_nohz_restart_sched_tick(ts, ktime_get(), 1);
 		}
 	}
 }
@@ -858,10 +858,14 @@ void tick_nohz_irq_exit(void)
 {
 	struct tick_sched *ts = this_cpu_ptr(&tick_cpu_sched);
 
-	if (ts->inidle)
+	if (ts->inidle) {
+		/* Cancel the timer because CPU already waken up from the C-states*/
+		menu_hrtimer_cancel();
 		__tick_nohz_idle_enter(ts);
-	else
+	}
+	else {
 		tick_nohz_full_stop_tick(ts);
+	}
 }
 
 /**
@@ -902,11 +906,15 @@ static void tick_nohz_restart(struct tick_sched *ts, ktime_t now)
 	}
 }
 
-static void tick_nohz_restart_sched_tick(struct tick_sched *ts, ktime_t now)
+static void tick_nohz_restart_sched_tick(struct tick_sched *ts, ktime_t now, int active)
 {
 	/* Update jiffies first */
 	tick_do_update_jiffies64(now);
+#ifdef CONFIG_SCHED_HMP
 	update_cpu_load_nohz();
+#else
+	update_cpu_load_nohz(active);
+#endif
 
 	calc_load_exit_idle();
 	touch_softlockup_watchdog();
@@ -924,7 +932,7 @@ static void tick_nohz_account_idle_ticks(struct tick_sched *ts)
 #ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
 	unsigned long ticks;
 
-	if (vtime_accounting_enabled())
+	if (vtime_accounting_cpu_enabled())
 		return;
 	/*
 	 * We stopped the tick in idle. Update process times would miss the
@@ -957,6 +965,8 @@ void tick_nohz_idle_exit(void)
 	WARN_ON_ONCE(!ts->inidle);
 
 	ts->inidle = 0;
+	/* Cancel the timer because CPU already waken up from the C-states*/
+	menu_hrtimer_cancel();
 
 	if (ts->idle_active || ts->tick_stopped)
 		now = ktime_get();
@@ -965,7 +975,7 @@ void tick_nohz_idle_exit(void)
 		tick_nohz_stop_idle(ts, now);
 
 	if (ts->tick_stopped) {
-		tick_nohz_restart_sched_tick(ts, now);
+		tick_nohz_restart_sched_tick(ts, now, 0);
 		tick_nohz_account_idle_ticks(ts);
 	}
 

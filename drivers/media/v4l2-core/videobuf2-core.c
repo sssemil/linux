@@ -916,7 +916,7 @@ static int __reqbufs(struct vb2_queue *q, struct v4l2_requestbuffers *req)
 	num_buffers = min_t(unsigned int, req->count, VIDEO_MAX_FRAME);
 	num_buffers = max_t(unsigned int, num_buffers, q->min_buffers_needed);
 	memset(q->plane_sizes, 0, sizeof(q->plane_sizes));
-	memset(q->alloc_ctx, 0, sizeof(q->alloc_ctx));
+	memset(q->alloc_ctx, 0, sizeof(q->alloc_ctx));/* [false alarm]:original code */
 	q->memory = req->memory;
 
 	/*
@@ -1025,7 +1025,7 @@ static int __create_bufs(struct vb2_queue *q, struct v4l2_create_buffers *create
 
 	if (!q->num_buffers) {
 		memset(q->plane_sizes, 0, sizeof(q->plane_sizes));
-		memset(q->alloc_ctx, 0, sizeof(q->alloc_ctx));
+		memset(q->alloc_ctx, 0, sizeof(q->alloc_ctx));/* [false alarm]:original code */
 		q->memory = create->memory;
 		q->waiting_for_buffers = !V4L2_TYPE_IS_OUTPUT(q->type);
 	}
@@ -1237,6 +1237,23 @@ void vb2_discard_done(struct vb2_queue *q)
 }
 EXPORT_SYMBOL_GPL(vb2_discard_done);
 
+static void vb2_warn_zero_bytesused(struct vb2_buffer *vb)
+{
+	static bool __check_once __read_mostly;
+
+	if (__check_once)
+		return;
+
+	__check_once = true;
+	__WARN();
+
+	pr_warn_once("use of bytesused == 0 is deprecated and will be removed in the future,\n");
+	if (vb->vb2_queue->allow_zero_bytesused)
+		pr_warn_once("use VIDIOC_DECODER_CMD(V4L2_DEC_CMD_STOP) instead.\n");
+	else
+		pr_warn_once("use the actual size instead.\n");
+}
+
 /**
  * __fill_vb2_buffer() - fill a vb2_buffer with information provided in a
  * v4l2_buffer by the userspace. The caller has already verified that struct
@@ -1246,16 +1263,6 @@ static void __fill_vb2_buffer(struct vb2_buffer *vb, const struct v4l2_buffer *b
 				struct v4l2_plane *v4l2_planes)
 {
 	unsigned int plane;
-
-	if (V4L2_TYPE_IS_OUTPUT(b->type)) {
-		if (WARN_ON_ONCE(b->bytesused == 0)) {
-			pr_warn_once("use of bytesused == 0 is deprecated and will be removed in the future,\n");
-			if (vb->vb2_queue->allow_zero_bytesused)
-				pr_warn_once("use VIDIOC_DECODER_CMD(V4L2_DEC_CMD_STOP) instead.\n");
-			else
-				pr_warn_once("use the actual size instead.\n");
-		}
-	}
 
 	if (V4L2_TYPE_IS_MULTIPLANAR(b->type)) {
 		if (b->memory == V4L2_MEMORY_USERPTR) {
@@ -1297,6 +1304,9 @@ static void __fill_vb2_buffer(struct vb2_buffer *vb, const struct v4l2_buffer *b
 				struct v4l2_plane *pdst = &v4l2_planes[plane];
 				struct v4l2_plane *psrc = &b->m.planes[plane];
 
+				if (psrc->bytesused == 0)
+					vb2_warn_zero_bytesused(vb);
+
 				if (vb->vb2_queue->allow_zero_bytesused)
 					pdst->bytesused = psrc->bytesused;
 				else
@@ -1331,6 +1341,9 @@ static void __fill_vb2_buffer(struct vb2_buffer *vb, const struct v4l2_buffer *b
 		}
 
 		if (V4L2_TYPE_IS_OUTPUT(b->type)) {
+			if (b->bytesused == 0)
+				vb2_warn_zero_bytesused(vb);
+
 			if (vb->vb2_queue->allow_zero_bytesused)
 				v4l2_planes[0].bytesused = b->bytesused;
 			else
@@ -2649,10 +2662,10 @@ unsigned int vb2_poll(struct vb2_queue *q, struct file *file, poll_table *wait)
 		return res | POLLERR;
 
 	/*
-	 * For output streams you can write as long as there are fewer buffers
-	 * queued than there are buffers available.
+	 * For output streams you can call write() as long as there are fewer
+	 * buffers queued than there are buffers available.
 	 */
-	if (V4L2_TYPE_IS_OUTPUT(q->type) && q->queued_count < q->num_buffers)
+	if (V4L2_TYPE_IS_OUTPUT(q->type) && q->fileio && q->queued_count < q->num_buffers)
 		return res | POLLOUT | POLLWRNORM;
 
 	if (list_empty(&q->done_list))
@@ -2981,7 +2994,7 @@ static size_t __vb2_perform_fileio(struct vb2_queue *q, char __user *data, size_
 		ret = __vb2_init_fileio(q, read);
 		dprintk(3, "vb2_init_fileio result: %d\n", ret);
 		if (ret)
-			return ret;
+			return ret;/* [false alarm]:original code */
 	}
 	fileio = q->fileio;
 
@@ -3004,7 +3017,7 @@ static size_t __vb2_perform_fileio(struct vb2_queue *q, char __user *data, size_
 		ret = vb2_internal_dqbuf(q, &fileio->b, nonblock);
 		dprintk(5, "vb2_dqbuf result: %d\n", ret);
 		if (ret)
-			return ret;
+			return ret;/* [false alarm]:original code */
 		fileio->dq_count += 1;
 
 		fileio->cur_index = index = fileio->b.index;
@@ -3086,7 +3099,7 @@ static size_t __vb2_perform_fileio(struct vb2_queue *q, char __user *data, size_
 		ret = vb2_internal_qbuf(q, &fileio->b);
 		dprintk(5, "vb2_dbuf result: %d\n", ret);
 		if (ret)
-			return ret;
+			return ret;/* [false alarm]:original code */
 
 		/*
 		 * Buffer has been queued, update the status
@@ -3116,7 +3129,7 @@ static size_t __vb2_perform_fileio(struct vb2_queue *q, char __user *data, size_
 	 */
 	if (ret == 0)
 		ret = count;
-	return ret;
+	return ret;/* [false alarm]:original code */
 }
 
 size_t vb2_read(struct vb2_queue *q, char __user *data, size_t count,

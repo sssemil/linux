@@ -714,7 +714,7 @@ static ssize_t sysfs_unbind_tick_dev(struct device *dev,
 	mutex_lock(&clockevents_mutex);
 	raw_spin_lock_irq(&clockevents_lock);
 	list_for_each_entry(ce, &clockevent_devices, list) {
-		if (!strcmp(ce->name, name)) {
+		if (ce->name && !strcmp(ce->name, name)) {
 			ret = __clockevents_try_unbind(ce, dev->id);
 			break;
 		}

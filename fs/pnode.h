@@ -20,8 +20,6 @@
 #define SET_MNT_MARK(m) ((m)->mnt.mnt_flags |= MNT_MARKED)
 #define CLEAR_MNT_MARK(m) ((m)->mnt.mnt_flags &= ~MNT_MARKED)
 #define IS_MNT_LOCKED(m) ((m)->mnt.mnt_flags & MNT_LOCKED)
-#define IS_MNT_LOCKED_AND_LAZY(m) \
-	(((m)->mnt.mnt_flags & (MNT_LOCKED|MNT_SYNC_UMOUNT)) == MNT_LOCKED)
 
 #define CL_EXPIRE    		0x01
 #define CL_SLAVE     		0x02
@@ -54,4 +52,5 @@ void mnt_set_mountpoint(struct mount *, struct mountpoint *,
 struct mount *copy_tree(struct mount *, struct dentry *, int);
 bool is_path_reachable(struct mount *, struct dentry *,
 			 const struct path *root);
+int count_mounts(struct mnt_namespace *ns, struct mount *mnt);
 #endif /* _LINUX_PNODE_H */

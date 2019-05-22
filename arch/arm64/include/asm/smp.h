@@ -20,10 +20,6 @@
 #include <linux/cpumask.h>
 #include <linux/thread_info.h>
 
-#ifndef CONFIG_SMP
-# error "<asm/smp.h> included in non-SMP build"
-#endif
-
 #define raw_smp_processor_id() (current_thread_info()->cpu)
 
 struct seq_file;
@@ -42,7 +38,7 @@ extern void handle_IPI(int ipinr, struct pt_regs *regs);
  * Discover the set of possible CPUs and determine their
  * SMP operations.
  */
-extern void of_smp_init_cpus(void);
+extern void smp_init_cpus(void);
 
 /*
  * Provide a function to raise an IPI cross call on CPUs in callmap.
@@ -72,5 +68,9 @@ extern int __cpu_disable(void);
 
 extern void __cpu_die(unsigned int cpu);
 extern void cpu_die(void);
+
+#ifdef CONFIG_HISI_BB
+extern unsigned int g_cpu_in_ipi_stop;
+#endif
 
 #endif /* ifndef __ASM_SMP_H */

@@ -2280,6 +2280,8 @@ struct cfg80211_qos_map {
  *	the driver, and will be valid until passed to cfg80211_scan_done().
  *	For scan results, call cfg80211_inform_bss(); you can call this outside
  *	the scan/scan_done bracket too.
+ * @abort_scan: Tell the driver to abort an ongoing scan. The driver shall
+ *	indicate the status of the scan through cfg80211_scan_done().
  *
  * @auth: Request to authenticate with the specified peer
  *	(invoked with the wireless_dev mutex held)
@@ -2549,6 +2551,8 @@ struct cfg80211_ops {
 
 	int	(*scan)(struct wiphy *wiphy,
 			struct cfg80211_scan_request *request);
+
+	void	(*abort_scan)(struct wiphy *wiphy, struct wireless_dev *wdev);
 
 	int	(*auth)(struct wiphy *wiphy, struct net_device *dev,
 			struct cfg80211_auth_request *req);
@@ -4582,6 +4586,28 @@ void cfg80211_roamed_bss(struct net_device *dev, struct cfg80211_bss *bss,
  */
 void cfg80211_disconnected(struct net_device *dev, u16 reason,
 			   const u8 *ie, size_t ie_len, gfp_t gfp);
+#ifdef CONFIG_HW_VOWIFI
+/**
+ * cfg80211_drv_vowifi - notification of vowifi event
+ *
+ * @dev: network device
+ * @gfp: allocation flags
+ *
+ */
+void cfg80211_drv_vowifi(struct net_device *dev, gfp_t gfp);
+#endif
+
+#ifdef CONFIG_HW_ABS
+/**
+ * cfg80211_drv_ant - notification of ant event
+ *
+ * @dev: network device
+ * @gfp: allocation flags
+ *
+ */
+void cfg80211_drv_ant(struct net_device *dev, gfp_t gfp);
+#endif
+
 
 /**
  * cfg80211_ready_on_channel - notification of remain_on_channel start

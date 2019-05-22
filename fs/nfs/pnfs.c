@@ -1413,11 +1413,11 @@ static bool pnfs_within_mdsthreshold(struct nfs_open_context *ctx,
 }
 
 /* stop waiting if someone clears NFS_LAYOUT_RETRY_LAYOUTGET bit. */
-static int pnfs_layoutget_retry_bit_wait(struct wait_bit_key *key)
+static int pnfs_layoutget_retry_bit_wait(struct wait_bit_key *key, int mode)
 {
 	if (!test_bit(NFS_LAYOUT_RETRY_LAYOUTGET, key->flags))
 		return 1;
-	return nfs_wait_bit_killable(key);
+	return nfs_wait_bit_killable(key, mode);
 }
 
 static bool pnfs_prepare_to_retry_layoutget(struct pnfs_layout_hdr *lo)
@@ -1821,6 +1821,7 @@ int pnfs_write_done_resend_to_mds(struct nfs_pgio_header *hdr)
 	/* Resend all requests through the MDS */
 	nfs_pageio_init_write(&pgio, hdr->inode, FLUSH_STABLE, true,
 			      hdr->completion_ops);
+	set_bit(NFS_CONTEXT_RESEND_WRITES, &hdr->args.context->flags);
 	return nfs_pageio_resend(&pgio, hdr);
 }
 EXPORT_SYMBOL_GPL(pnfs_write_done_resend_to_mds);
@@ -1865,6 +1866,7 @@ pnfs_write_through_mds(struct nfs_pageio_descriptor *desc,
 		mirror->pg_recoalesce = 1;
 	}
 	nfs_pgio_data_destroy(hdr);
+	hdr->release(hdr);
 }
 
 static enum pnfs_try_status
@@ -1979,6 +1981,7 @@ pnfs_read_through_mds(struct nfs_pageio_descriptor *desc,
 		mirror->pg_recoalesce = 1;
 	}
 	nfs_pgio_data_destroy(hdr);
+	hdr->release(hdr);
 }
 
 /*

@@ -127,15 +127,18 @@ EXPORT_SYMBOL_GPL(gpiod_to_chip);
 static int gpiochip_find_base(int ngpio)
 {
 	struct gpio_chip *chip;
-	int base = ARCH_NR_GPIOS - ngpio;
+	int base = 0;
 
 	list_for_each_entry_reverse(chip, &gpio_chips, list) {
 		/* found a free space? */
 		if (chip->base + chip->ngpio <= base)
 			break;
-		else
+		else{
 			/* nope, check the space right before the chip */
-			base = chip->base - ngpio;
+			base = chip->base + ngpio;
+			if (base > ARCH_NR_GPIOS)
+				return -ENOSPC;
+	}
 	}
 
 	if (gpio_is_valid(base)) {
@@ -1003,7 +1006,11 @@ int gpiod_direction_input(struct gpio_desc *desc)
 	return status;
 }
 EXPORT_SYMBOL_GPL(gpiod_direction_input);
-
+int gpio_direction_input(unsigned gpio)
+{
+	return gpiod_direction_input(gpio_to_desc(gpio));
+}
+EXPORT_SYMBOL_GPL(gpio_direction_input);
 static int _gpiod_direction_output_raw(struct gpio_desc *desc, int value)
 {
 	struct gpio_chip	*chip;
@@ -1061,6 +1068,11 @@ int gpiod_direction_output_raw(struct gpio_desc *desc, int value)
 	return _gpiod_direction_output_raw(desc, value);
 }
 EXPORT_SYMBOL_GPL(gpiod_direction_output_raw);
+int gpio_direction_output(unsigned gpio, int value)
+{
+	return gpiod_direction_output_raw(gpio_to_desc(gpio), value);
+}
+EXPORT_SYMBOL_GPL(gpio_direction_output);
 
 /**
  * gpiod_direction_output - set the GPIO direction to output

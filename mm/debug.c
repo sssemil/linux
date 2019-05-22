@@ -11,6 +11,9 @@
 #include <linux/memcontrol.h>
 
 static const struct trace_print_flags pageflag_names[] = {
+#ifdef CONFIG_HISI_KERNELDUMP
+	{1UL << PG_memdump,		"kerneldump"    }, /* added for kernel dump. */
+#endif
 	{1UL << PG_locked,		"locked"	},
 	{1UL << PG_error,		"error"		},
 	{1UL << PG_referenced,		"referenced"	},
@@ -47,6 +50,9 @@ static const struct trace_print_flags pageflag_names[] = {
 #endif
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	{1UL << PG_compound_lock,	"compound_lock"	},
+#endif
+#ifdef CONFIG_TASK_PROTECT_LRU
+	{1UL << PG_protect,		"protect"	},
 #endif
 };
 

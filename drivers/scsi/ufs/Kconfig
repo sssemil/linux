@@ -35,8 +35,6 @@
 config SCSI_UFSHCD
 	tristate "Universal Flash Storage Controller Driver Core"
 	depends on SCSI && SCSI_DMA
-	select PM_DEVFREQ
-	select DEVFREQ_GOV_SIMPLE_ONDEMAND
 	---help---
 	This selects the support for UFS devices in Linux, say Y and make
 	  sure that you know the name of your UFS host adapter (the card
@@ -83,3 +81,90 @@ config SCSI_UFS_QCOM
 
 	  Select this if you have UFS controller on QCOM chipset.
 	  If unsure, say N.
+
+config SCSI_UFS_KIRIN
+	  tristate "KIRIN UFS Host Controller Driver"
+	  depends on SCSI_UFSHCD && SCSI_UFSHCD_PLATFORM
+	  ---help---
+	  This selects the KIRIN UFS host controller driver.
+
+	  If you have a controller with this interface, say Y or M here.
+
+	  If unsure, say N.
+
+config SCSI_UFS_KIRIN_LINERESET_CHECK
+	  bool "KIRIN UFS background thread to check line-reset"
+	  depends on SCSI_UFSHCD && SCSI_UFS_KIRIN
+	  ---help---
+	  This create a thread to check line-reset bug, and recovery it.
+
+	  If using Kirin960, say Y here.
+
+	  If unsure, say N.
+
+config SCSI_UFS_TEST
+	tristate "Universal Flash Storage host controller driver unit-tests"
+	depends on SCSI_UFSHCD
+	---help---
+	This adds UFS Host controller unit-test framework.
+	The UFS unit-tests register as a block device test utility to
+	the test-iosched and will be initiated when the test-iosched will
+	be chosen to be the active I/O scheduler.
+
+config SCSI_UFS_INLINE_CRYPTO
+	tristate "UFS inline crytpo driver based on Kirin UFS Host Controller"
+	depends on HISI_BLK_INLINE_CRYPTO && SCSI_UFSHCD && SCSI_UFS_KIRIN
+
+	---help---
+	This selects the Kirin UFS inline crypto driver.
+
+	Select this if you want to use Hardware Crypto Engine
+	and using its interface for some special cryto func.
+	Otherwise, if you love my driver code, say Y or M here.
+
+	If unsure, say N.
+
+config SCSI_UFS_HS_ERROR_RECOVER
+	tristate "UFS use this config to recover ufs hs error"
+	depends on SCSI_UFSHCD && SCSI_UFS_KIRIN
+
+	---help---
+	This selects the recovery of error in HS_MODE.
+
+	Select this if needed to recover error in HS_MODE.
+
+	If unsure, say N.
+
+config SCSI_UFS_BLOCK_TEST
+	tristate "Universal Flash Storage host controller driver unit-tests"
+	depends on SCSI_UFSHCD && IOSCHED_TEST
+	---help---
+	This adds UFS Host controller unit-test framework.
+	The UFS unit-tests register as a block device test utility to
+	the test-iosched and will be initiated when the test-iosched will
+	be chosen to be the active I/O scheduler.
+	
+config HUAWEI_UFS_DSM
+       bool "Listen UFS Kernel Error"
+       depends on SCSI_UFSHCD
+
+config UFS_DEVICE_RELATED_CONFIGS
+       bool "Enable device related configs through dts"
+       depends on SCSI_UFS_KIRIN && HUAWEI_UFS_DSM
+
+config SCSI_UFS_KIRIN_V21
+	  tristate "KIRIN V21 UFS Host Controller Driver"
+	  depends on SCSI_UFSHCD && SCSI_UFSHCD_PLATFORM && SCSI_UFS_KIRIN
+	  ---help---
+	  This selects the KIRIN V21 UFS host controller driver.
+
+	  If you have a controller with this interface, say Y or M here.
+
+	  If unsure, say N.
+
+config HUAWEI_UFS_HEALTH_INFO
+	tristate "UFS health information bigdata report"
+	default n
+	depends on SCSI_UFSHCD && HUAWEI_UFS_DSM
+	---help---
+	This adds UFS health information bigdata report framework.

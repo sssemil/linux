@@ -217,6 +217,23 @@ struct sock_common {
 	/* public: */
 };
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+/* cdn: Cross-layer Dropped Notification */
+#define MAX_CDN_QSIZE 256
+
+struct cdn_queue {
+	struct cdn_queue	*next;
+	u32			seq;
+	u32			padding;
+};
+
+struct cdn_entry {
+	struct cdn_queue	pool[MAX_CDN_QSIZE];
+	struct cdn_queue	*hint;
+	struct cdn_queue	*head;
+	int			index;
+};
+#endif
 struct cg_proto;
 /**
   *	struct sock - network layer representation of sockets
@@ -369,6 +386,20 @@ struct sock {
 	struct sk_filter __rcu	*sk_filter;
 	struct socket_wq __rcu	*sk_wq;
 
+#ifdef CONFIG_HUAWEI_BASTET
+	struct bastet_sock *bastet;
+	struct bastet_reconn *reconn;
+	int fg_Spec;
+	int fg_Step;
+	bool prio_channel;
+	uint8_t acc_state;
+#endif
+
+#ifdef CONFIG_HW_WIFIPRO
+	int wifipro_is_google_sock;
+	char wifipro_dev_name[IFNAMSIZ];
+#endif
+
 #ifdef CONFIG_XFRM
 	struct xfrm_policy	*sk_policy[2];
 #endif
@@ -386,6 +417,7 @@ struct sock {
 				sk_no_check_rx : 1,
 				sk_userlocks : 4,
 				sk_protocol  : 8,
+#define SK_PROTOCOL_MAX U8_MAX
 				sk_type      : 16;
 	kmemcheck_bitfield_end(flags);
 	int			sk_wmem_queued;
@@ -438,6 +470,20 @@ struct sock {
 	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);
 	void                    (*sk_destruct)(struct sock *sk);
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+	u32			start_seq;
+	u32			snd_id;
+	u32			nowrtt;
+	u32			fast_rexmit_cnts;
+	u32			timeout_rexmit_cnts;
+	u32			modem_drop_rexmit_cnts;
+	u32			undo_modem_drop_cnts;
+#endif
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	struct cdn_entry	*sk_dropped;
+	u32			undo_modem_drop_marker;
+	u32			cdn_hash_marker;
+#endif
 };
 
 #define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
@@ -796,7 +842,7 @@ void sk_stream_write_space(struct sock *sk);
 static inline void __sk_add_backlog(struct sock *sk, struct sk_buff *skb)
 {
 	/* dont let skb dst not refcounted, we are going to leave rcu lock */
-	skb_dst_force(skb);
+	skb_dst_force_safe(skb);
 
 	if (!sk->sk_backlog.tail)
 		sk->sk_backlog.head = skb;
@@ -825,6 +871,14 @@ static inline __must_check int sk_add_backlog(struct sock *sk, struct sk_buff *s
 {
 	if (sk_rcvqueues_full(sk, limit))
 		return -ENOBUFS;
+
+	/*
+	 * If the skb was allocated from pfmemalloc reserves, only
+	 * allow SOCK_MEMALLOC sockets to use it as this socket is
+	 * helping free memory
+	 */
+	if (skb_pfmemalloc(skb) && !sock_flag(sk, SOCK_MEMALLOC))
+		return -ENOMEM;
 
 	__sk_add_backlog(sk, skb);
 	sk->sk_backlog.len += skb->truesize;
@@ -1039,6 +1093,7 @@ struct proto {
 	void			(*destroy_cgroup)(struct mem_cgroup *memcg);
 	struct cg_proto		*(*proto_cgroup)(struct mem_cgroup *memcg);
 #endif
+	int			(*diag_destroy)(struct sock *sk, int err);
 };
 
 /*
@@ -1071,11 +1126,6 @@ struct cg_proto {
 
 int proto_register(struct proto *prot, int alloc_slab);
 void proto_unregister(struct proto *prot);
-
-static inline bool memcg_proto_active(struct cg_proto *cg_proto)
-{
-	return test_bit(MEMCG_SOCK_ACTIVE, &cg_proto->flags);
-}
 
 #ifdef SOCK_REFCNT_DEBUG
 static inline void sk_refcnt_debug_inc(struct sock *sk)

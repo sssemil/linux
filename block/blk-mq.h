@@ -1,6 +1,9 @@
 #ifndef INT_BLK_MQ_H
 #define INT_BLK_MQ_H
 
+#include "blk-stat.h"
+#include <linux/preempt.h>
+
 struct blk_mq_tag_set;
 
 struct blk_mq_ctx {
@@ -20,12 +23,16 @@ struct blk_mq_ctx {
 
 	/* incremented at completion time */
 	unsigned long		____cacheline_aligned_in_smp rq_completed[2];
+#ifdef CONFIG_WBT
+	struct blk_rq_stat	stat[4];
+#endif
 
 	struct request_queue	*queue;
 	struct kobject		kobj;
 } ____cacheline_aligned_in_smp;
 
 void __blk_mq_complete_request(struct request *rq);
+void blk_mq_run_hw_queue_unlocked(struct blk_mq_hw_ctx *hctx);
 void blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async);
 void blk_mq_freeze_queue(struct request_queue *q);
 void blk_mq_free_queue(struct request_queue *q);
@@ -51,7 +58,8 @@ void blk_mq_disable_hotplug(void);
  * CPU -> queue mappings
  */
 extern unsigned int *blk_mq_make_queue_map(struct blk_mq_tag_set *set);
-extern int blk_mq_update_queue_map(unsigned int *map, unsigned int nr_queues);
+extern int blk_mq_update_queue_map(unsigned int *map, unsigned int nr_queues,
+				   const struct cpumask *online_mask);
 extern int blk_mq_hw_queue_to_node(unsigned int *map, unsigned int);
 
 /*
@@ -90,10 +98,22 @@ static inline struct blk_mq_ctx *blk_mq_get_ctx(struct request_queue *q)
 	return __blk_mq_get_ctx(q, get_cpu());
 }
 
+#ifdef CONFIG_HISI_BLK_MQ
+static inline void blk_mq_put_ctx(struct blk_mq_ctx *ctx)
+{
+	if(current->plug && (!list_empty(&current->plug->mq_list))){
+		barrier();
+		preempt_count_dec();
+	}
+	else
+		put_cpu();
+}
+#else
 static inline void blk_mq_put_ctx(struct blk_mq_ctx *ctx)
 {
 	put_cpu();
 }
+#endif
 
 struct blk_mq_alloc_data {
 	/* input parameter */

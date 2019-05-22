@@ -21,6 +21,13 @@
 #include <linux/slab.h>
 
 #include "cpufreq_governor.h"
+#ifdef CONFIG_HUAWEI_MSG_POLICY
+#include <huawei_platform/power/msgnotify.h>
+#endif
+
+#ifdef CONFIG_HISI_BIG_MAXFREQ_HOTPLUG
+extern void set_bL_hifreq_load(unsigned int max_load);
+#endif
 
 static struct attribute_group *get_sysfs_attr(struct dbs_data *dbs_data)
 {
@@ -40,6 +47,10 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 	unsigned int max_load = 0;
 	unsigned int ignore_nice;
 	unsigned int j;
+#ifdef CONFIG_HUAWEI_MSG_POLICY
+	u64 now_msg_timestamp;
+	unsigned int active_time;
+#endif
 
 	if (dbs_data->cdata->governor == GOV_ONDEMAND) {
 		struct od_cpu_dbs_info_s *od_dbs_info =
@@ -148,13 +159,25 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 			 */
 			j_cdbs->prev_load = 0;
 		} else {
+#ifdef CONFIG_HUAWEI_MSG_POLICY
+			now_msg_timestamp = kcpustat_cpu(j).cpustat[CPUTIME_MESSAGE];
+			active_time = (unsigned int)adjust_active_time_by_msg(j, (wall_time - idle_time),
+				wall_time, (now_msg_timestamp - j_cdbs->cputime_msg_timestamp));
+			load = 100 * active_time / wall_time;
+			j_cdbs->cputime_msg_timestamp = now_msg_timestamp;
+#else
 			load = 100 * (wall_time - idle_time) / wall_time;
+#endif
 			j_cdbs->prev_load = load;
 		}
 
 		if (load > max_load)
 			max_load = load;
 	}
+
+#ifdef CONFIG_HISI_BIG_MAXFREQ_HOTPLUG
+	set_bL_hifreq_load(max_load);
+#endif
 
 	dbs_data->cdata->gov_check_cpu(cpu, max_load);
 }
@@ -387,6 +410,10 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 			if (ignore_nice)
 				j_cdbs->prev_cpu_nice =
 					kcpustat_cpu(j).cpustat[CPUTIME_NICE];
+#ifdef CONFIG_HUAWEI_MSG_POLICY
+			j_cdbs->cputime_msg_timestamp =
+				kcpustat_cpu(cpu).cpustat[CPUTIME_MESSAGE];
+#endif
 
 			mutex_init(&j_cdbs->timer_mutex);
 			INIT_DEFERRABLE_WORK(&j_cdbs->work,
@@ -394,13 +421,13 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		}
 
 		if (dbs_data->cdata->governor == GOV_CONSERVATIVE) {
-			cs_dbs_info->down_skip = 0;
+			cs_dbs_info->down_skip = 0; /* [false alarm]:fortify */
 			cs_dbs_info->enable = 1;
 			cs_dbs_info->requested_freq = policy->cur;
 		} else {
-			od_dbs_info->rate_mult = 1;
+			od_dbs_info->rate_mult = 1; /* [false alarm]:fortify */
 			od_dbs_info->sample_type = OD_NORMAL_SAMPLE;
-			od_ops->powersave_bias_init_cpu(cpu);
+			od_ops->powersave_bias_init_cpu(cpu); /* [false alarm]:fortify */
 		}
 
 		mutex_unlock(&dbs_data->mutex);
@@ -414,7 +441,7 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 
 	case CPUFREQ_GOV_STOP:
 		if (dbs_data->cdata->governor == GOV_CONSERVATIVE)
-			cs_dbs_info->enable = 0;
+			cs_dbs_info->enable = 0; /* [false alarm]:fortify */
 
 		gov_cancel_work(dbs_data, policy);
 

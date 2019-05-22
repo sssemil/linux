@@ -34,7 +34,12 @@
 #include <linux/memcontrol.h>
 #include <linux/cleancache.h>
 #include <linux/rmap.h>
+#include <linux/hisi/page_tracker.h>
 #include "internal.h"
+
+#ifdef CONFIG_TASK_PROTECT_LRU
+#include <linux/hisi/protect_lru.h>
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/filemap.h>
@@ -45,6 +50,14 @@
 #include <linux/buffer_head.h> /* for try_to_free_buffers */
 
 #include <asm/mman.h>
+
+#ifdef CONFIG_HUAWEI_IO_TRACING
+#include <trace/iotrace.h>
+DEFINE_TRACE(generic_perform_write_enter);
+DEFINE_TRACE(generic_perform_write_end);
+DEFINE_TRACE(generic_file_read_begin);
+DEFINE_TRACE(generic_file_read_end);
+#endif
 
 /*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
@@ -100,6 +113,7 @@
  *    ->tree_lock		(page_remove_rmap->set_page_dirty)
  *    bdi.wb->list_lock		(page_remove_rmap->set_page_dirty)
  *    ->inode->i_lock		(page_remove_rmap->set_page_dirty)
+ *    ->memcg->move_lock	(page_remove_rmap->mem_cgroup_begin_page_stat)
  *    bdi.wb->list_lock		(zap_pte_range->set_page_dirty)
  *    ->inode->i_lock		(zap_pte_range->set_page_dirty)
  *    ->private_lock		(zap_pte_range->__set_page_dirty_buffers)
@@ -174,9 +188,11 @@ static void page_cache_tree_delete(struct address_space *mapping,
 /*
  * Delete a page from the page cache and free it. Caller has to make
  * sure the page is locked and that nobody else uses it - or that usage
- * is safe.  The caller must hold the mapping's tree_lock.
+ * is safe.  The caller must hold the mapping's tree_lock and
+ * mem_cgroup_begin_page_stat().
  */
-void __delete_from_page_cache(struct page *page, void *shadow)
+void __delete_from_page_cache(struct page *page, void *shadow,
+			      struct mem_cgroup *memcg)
 {
 	struct address_space *mapping = page->mapping;
 
@@ -210,7 +226,7 @@ void __delete_from_page_cache(struct page *page, void *shadow)
 	 * anyway will be cleared before returning page into buddy allocator.
 	 */
 	if (WARN_ON_ONCE(PageDirty(page)))
-		account_page_cleaned(page, mapping);
+		account_page_cleaned(page, mapping, memcg);
 }
 
 /**
@@ -224,14 +240,20 @@ void __delete_from_page_cache(struct page *page, void *shadow)
 void delete_from_page_cache(struct page *page)
 {
 	struct address_space *mapping = page->mapping;
+	struct mem_cgroup *memcg;
+	unsigned long flags;
+
 	void (*freepage)(struct page *);
 
 	BUG_ON(!PageLocked(page));
 
 	freepage = mapping->a_ops->freepage;
-	spin_lock_irq(&mapping->tree_lock);
-	__delete_from_page_cache(page, NULL);
-	spin_unlock_irq(&mapping->tree_lock);
+
+	memcg = mem_cgroup_begin_page_stat(page);
+	spin_lock_irqsave(&mapping->tree_lock, flags);
+	__delete_from_page_cache(page, NULL, memcg);
+	spin_unlock_irqrestore(&mapping->tree_lock, flags);
+	mem_cgroup_end_page_stat(memcg);
 
 	if (freepage)
 		freepage(page);
@@ -470,6 +492,8 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 	if (!error) {
 		struct address_space *mapping = old->mapping;
 		void (*freepage)(struct page *);
+		struct mem_cgroup *memcg;
+		unsigned long flags;
 
 		pgoff_t offset = old->index;
 		freepage = mapping->a_ops->freepage;
@@ -478,15 +502,17 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 		new->mapping = mapping;
 		new->index = offset;
 
-		spin_lock_irq(&mapping->tree_lock);
-		__delete_from_page_cache(old, NULL);
+		memcg = mem_cgroup_begin_page_stat(old);
+		spin_lock_irqsave(&mapping->tree_lock, flags);
+		__delete_from_page_cache(old, NULL, memcg);
 		error = radix_tree_insert(&mapping->page_tree, offset, new);
 		BUG_ON(error);
 		mapping->nrpages++;
 		__inc_zone_page_state(new, NR_FILE_PAGES);
 		if (PageSwapBacked(new))
 			__inc_zone_page_state(new, NR_SHMEM);
-		spin_unlock_irq(&mapping->tree_lock);
+		spin_unlock_irqrestore(&mapping->tree_lock, flags);
+		mem_cgroup_end_page_stat(memcg);
 		mem_cgroup_migrate(old, new, true);
 		radix_tree_preload_end();
 		if (freepage)
@@ -576,6 +602,7 @@ static int __add_to_page_cache_locked(struct page *page,
 	if (unlikely(error))
 		goto err_insert;
 	__inc_zone_page_state(page, NR_FILE_PAGES);
+	page_tracker_set_type(page, TRACK_FILE, 0);
 	spin_unlock_irq(&mapping->tree_lock);
 	if (!huge)
 		mem_cgroup_commit_charge(page, memcg, false);
@@ -631,6 +658,9 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 			workingset_activation(page);
 		} else
 			ClearPageActive(page);
+#ifdef CONFIG_TASK_PROTECT_LRU
+		protect_lru_set_from_file(page);
+#endif
 		lru_cache_add(page);
 	}
 	return ret;
@@ -1125,7 +1155,11 @@ no_page:
 		}
 	}
 
+#ifdef CONFIG_TASK_PROTECT_LRU
+	return protect_lru_move_and_shrink(page);
+#else
 	return page;
+#endif
 }
 EXPORT_SYMBOL(pagecache_get_page);
 
@@ -1477,6 +1511,10 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 	last_index = (*ppos + iter->count + PAGE_CACHE_SIZE-1) >> PAGE_CACHE_SHIFT;
 	offset = *ppos & ~PAGE_CACHE_MASK;
 
+#ifdef CONFIG_HUAWEI_IO_TRACING
+    trace_generic_file_read_begin(filp, iter->count);
+#endif
+
 	for (;;) {
 		struct page *page;
 		pgoff_t end_index;
@@ -1668,7 +1706,12 @@ no_cached_page:
 	}
 
 out:
-	ra->prev_pos = prev_index;
+	
+#ifdef CONFIG_HUAWEI_IO_TRACING 
+    trace_generic_file_read_end(filp, written);
+#endif 
+
+    ra->prev_pos = prev_index;
 	ra->prev_pos <<= PAGE_CACHE_SHIFT;
 	ra->prev_pos |= prev_offset;
 
@@ -1887,10 +1930,14 @@ int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		 * We found the page, so try async readahead before
 		 * waiting for the lock.
 		 */
+		task_set_in_pagefault(current);
 		do_async_mmap_readahead(vma, ra, file, page, offset);
+		task_clear_in_pagefault(current);
 	} else if (!page) {
 		/* No page in the page cache at all */
+		task_set_in_pagefault(current);
 		do_sync_mmap_readahead(vma, ra, file, offset);
+		task_clear_in_pagefault(current);
 		count_vm_event(PGMAJFAULT);
 		mem_cgroup_count_vm_event(vma->vm_mm, PGMAJFAULT);
 		ret = VM_FAULT_MAJOR;
@@ -1939,7 +1986,9 @@ no_cached_page:
 	 * We're only likely to ever get here if MADV_RANDOM is in
 	 * effect.
 	 */
+	task_set_in_pagefault(current);
 	error = page_cache_read(file, offset);
+	task_clear_in_pagefault(current);
 
 	/*
 	 * The page we want has now been added to the page cache.
@@ -1966,7 +2015,9 @@ page_not_uptodate:
 	 * and we need to check for errors.
 	 */
 	ClearPageError(page);
+	task_set_in_pagefault(current);
 	error = mapping->a_ops->readpage(file, page);
+	task_clear_in_pagefault(current);
 	if (!error) {
 		wait_on_page_locked(page);
 		if (!PageUptodate(page))
@@ -2461,6 +2512,11 @@ again:
 			break;
 		}
 
+		if (fatal_signal_pending(current)) {
+			status = -EINTR;
+			break;
+		}
+
 		status = a_ops->write_begin(file, mapping, pos, bytes, flags,
 						&page, &fsdata);
 		if (unlikely(status < 0))
@@ -2498,10 +2554,6 @@ again:
 		written += copied;
 
 		balance_dirty_pages_ratelimited(mapping);
-		if (fatal_signal_pending(current)) {
-			status = -EINTR;
-			break;
-		}
 	} while (iov_iter_count(i));
 
 	return written ? written : status;

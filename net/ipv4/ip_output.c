@@ -80,6 +80,15 @@
 #include <linux/netlink.h>
 #include <linux/tcp.h>
 
+#ifdef CONFIG_HUAWEI_WIFI_WEIXIN_HONGBAO_ENABLE_PRIORITY
+#define WIFI_WEIXIN_HONGBAO_PROORITY 0x7
+extern uint8_t BST_FG_Proc_Send_RPacket_Priority(struct sock *pstSock);
+#endif
+
+#ifdef CONFIG_HUAWEI_BASTET
+int g_FastGrabDscp = 0;    /*fg app dscp value,get from hilink*/
+#endif
+
 int sysctl_ip_default_ttl __read_mostly = IPDEFTTL;
 EXPORT_SYMBOL(sysctl_ip_default_ttl);
 
@@ -235,6 +244,7 @@ static int ip_finish_output_gso(struct sock *sk, struct sk_buff *skb)
 	 * from host network stack.
 	 */
 	features = netif_skb_features(skb);
+	BUILD_BUG_ON(sizeof(*IPCB(skb)) > SKB_SGO_CB_OFFSET);
 	segs = skb_gso_segment(skb, features & ~NETIF_F_GSO_MASK);
 	if (IS_ERR_OR_NULL(segs)) {
 		kfree_skb(skb);
@@ -416,6 +426,15 @@ packet_routed:
 	if (inet_opt && inet_opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto no_route;
 
+#ifdef CONFIG_HUAWEI_BASTET
+	/*if get dscp value and this socket belong to fg, modify dscp to support high pri transmission*/
+	if (g_FastGrabDscp != 0 && sk->fg_Spec > 0 && inet->tos == 0)
+	{
+		/*dscp is the highest 6 bits of tos*/
+		inet->tos = (((__u8)g_FastGrabDscp) << 2);
+	}
+#endif
+
 	/* OK, we know where to send it, allocate and build IP header. */
 	skb_push(skb, sizeof(struct iphdr) + (inet_opt ? inet_opt->opt.optlen : 0));
 	skb_reset_network_header(skb);
@@ -442,7 +461,13 @@ packet_routed:
 	/* TODO : should we use skb->sk here instead of sk ? */
 	skb->priority = sk->sk_priority;
 	skb->mark = sk->sk_mark;
-
+#ifdef CONFIG_HUAWEI_BASTET
+#ifdef CONFIG_HUAWEI_WIFI_WEIXIN_HONGBAO_ENABLE_PRIORITY
+	if(1 == BST_FG_Proc_Send_RPacket_Priority(sk)) {
+		skb->priority = WIFI_WEIXIN_HONGBAO_PROORITY;
+	}
+#endif
+#endif
 	res = ip_local_out(skb);
 	rcu_read_unlock();
 	return res;
@@ -893,7 +918,7 @@ static int __ip_append_data(struct sock *sk,
 	if (((length > mtu) || (skb && skb_is_gso(skb))) &&
 	    (sk->sk_protocol == IPPROTO_UDP) &&
 	    (rt->dst.dev->features & NETIF_F_UFO) && !rt->dst.header_len &&
-	    (sk->sk_type == SOCK_DGRAM)) {
+	    (sk->sk_type == SOCK_DGRAM) && !sk->sk_no_check_tx) {
 		err = ip_ufo_append_data(sk, queue, getfrag, from, length,
 					 hh_len, fragheaderlen, transhdrlen,
 					 maxfraglen, flags);
@@ -1547,7 +1572,8 @@ void ip_send_unicast_reply(struct sock *sk, struct sk_buff *skb,
 			   RT_SCOPE_UNIVERSE, ip_hdr(skb)->protocol,
 			   ip_reply_arg_flowi_flags(arg),
 			   daddr, saddr,
-			   tcp_hdr(skb)->source, tcp_hdr(skb)->dest);
+			   tcp_hdr(skb)->source, tcp_hdr(skb)->dest,
+			   arg->uid);
 	security_skb_classify_flow(skb, flowi4_to_flowi(&fl4));
 	rt = ip_route_output_key(net, &fl4);
 	if (IS_ERR(rt))

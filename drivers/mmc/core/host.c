@@ -32,7 +32,9 @@
 #include "slot-gpio.h"
 #include "pwrseq.h"
 
-#define cls_dev_to_mmc_host(d)	container_of(d, struct mmc_host, class_dev)
+#ifdef CONFIG_HUAWEI_SDCARD_DSM
+#include <linux/mmc/dsm_sdcard.h>
+#endif
 
 static DEFINE_IDR(mmc_host_idr);
 static DEFINE_SPINLOCK(mmc_host_lock);
@@ -43,6 +45,7 @@ static void mmc_host_classdev_release(struct device *dev)
 	spin_lock(&mmc_host_lock);
 	idr_remove(&mmc_host_idr, host->index);
 	spin_unlock(&mmc_host_lock);
+	wake_lock_destroy(&host->detect_wake_lock);
 	kfree(host);
 }
 
@@ -373,7 +376,7 @@ int mmc_of_parse(struct mmc_host *host)
 					   0, &cd_gpio_invert);
 		if (!ret)
 			dev_info(host->parent, "Got CD GPIO\n");
-		else if (ret != -ENOENT)
+		else if (ret != -ENOENT && ret != -ENOSYS)
 			return ret;
 
 		/*
@@ -387,7 +390,7 @@ int mmc_of_parse(struct mmc_host *host)
 		 * both inverted, the end result is that the CD line is
 		 * not inverted.
 		 */
-		if (cd_cap_invert ^ cd_gpio_invert)
+		if (cd_cap_invert ^ cd_gpio_invert)/*lint !e514 */
 			host->caps2 |= MMC_CAP2_CD_ACTIVE_HIGH;
 	}
 
@@ -397,11 +400,11 @@ int mmc_of_parse(struct mmc_host *host)
 	ret = mmc_gpiod_request_ro(host, "wp", 0, false, 0, &ro_gpio_invert);
 	if (!ret)
 		dev_info(host->parent, "Got WP GPIO\n");
-	else if (ret != -ENOENT)
+	else if (ret != -ENOENT && ret != -ENOSYS)
 		return ret;
 
 	/* See the comment on CD inversion above */
-	if (ro_cap_invert ^ ro_gpio_invert)
+	if (ro_cap_invert ^ ro_gpio_invert)/*lint !e514 */
 		host->caps2 |= MMC_CAP2_RO_ACTIVE_HIGH;
 
 	if (of_find_property(np, "cap-sd-highspeed", &len))
@@ -449,10 +452,49 @@ int mmc_of_parse(struct mmc_host *host)
 		host->dsr_req = 0;
 	}
 
+	/* HISI do not use power sequence */
 	return mmc_pwrseq_alloc(host);
 }
 
 EXPORT_SYMBOL(mmc_of_parse);
+
+#ifdef CONFIG_HISI_MMC
+
+void hisi_stub_mmc_to_adapt_ufs(struct device *dev)
+{
+	int err = -1;
+	unsigned int stub_times = 0;
+	unsigned int stub_loop = 0;
+	static unsigned int enter_time = 0;
+
+	if (enter_time > 0)
+		return;
+	else {
+		/*if first enter this func but dev is not eMMC card*/
+		if (!strncmp(dev_name(dev), "hi_mci.1", strlen("hi_mci.1")))
+			stub_times = 1;
+		/*sd card not int too, sdio init first*/
+		if (!strncmp(dev_name(dev), "hi_mci.2", strlen("hi_mci.2")))
+			stub_times = 2;
+
+		for (stub_loop = 0; stub_loop < stub_times; stub_loop++) {
+			idr_preload(GFP_KERNEL);
+			spin_lock(&mmc_host_lock);
+			err = idr_alloc(&mmc_host_idr, NULL, 0, 0, GFP_NOWAIT);
+			spin_unlock(&mmc_host_lock);
+			idr_preload_end();
+		}
+		if (stub_times)
+			pr_err("%s %s stub for mmc idr num %d\n",
+				__func__, dev_name(dev), err);
+
+		enter_time += 1;
+	}
+
+	return;
+}
+
+#endif
 
 /**
  *	mmc_alloc_host - initialise the per-host structure.
@@ -472,6 +514,10 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 
 	/* scanning will be enabled when we're ready */
 	host->rescan_disable = 1;
+#ifdef CONFIG_HISI_MMC
+	hisi_stub_mmc_to_adapt_ufs(dev);
+#endif
+
 	idr_preload(GFP_KERNEL);
 	spin_lock(&mmc_host_lock);
 	err = idr_alloc(&mmc_host_idr, host, 0, 0, GFP_NOWAIT);
@@ -491,15 +537,25 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	host->class_dev.class = &mmc_host_class;
 	device_initialize(&host->class_dev);
 
+	/* HISI do not use slot gpio */
+#if 0
 	if (mmc_gpio_alloc(host)) {
 		put_device(&host->class_dev);
 		return NULL;
 	}
+#endif
 
 	mmc_host_clk_init(host);
 
 	spin_lock_init(&host->lock);
 	init_waitqueue_head(&host->wq);
+	wake_lock_init(&host->detect_wake_lock, WAKE_LOCK_SUSPEND,
+		kasprintf(GFP_KERNEL, "%s_detect", mmc_hostname(host)));
+
+#ifdef CONFIG_HUAWEI_SDCARD_DSM
+	dsm_sdcard_init();
+#endif
+
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
 #ifdef CONFIG_PM
 	host->pm_notify.notifier_call = mmc_pm_notify;
@@ -518,7 +574,6 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 
 	return host;
 }
-
 EXPORT_SYMBOL(mmc_alloc_host);
 
 /**
@@ -547,8 +602,11 @@ int mmc_add_host(struct mmc_host *host)
 #endif
 	mmc_host_clk_sysfs_init(host);
 
+	mmc_latency_hist_sysfs_init(host);
+
 	mmc_start_host(host);
-	register_pm_notifier(&host->pm_notify);
+	if (!(host->pm_flags & MMC_PM_IGNORE_PM_NOTIFY))
+		register_pm_notifier(&host->pm_notify);
 
 	return 0;
 }
@@ -565,12 +623,16 @@ EXPORT_SYMBOL(mmc_add_host);
  */
 void mmc_remove_host(struct mmc_host *host)
 {
-	unregister_pm_notifier(&host->pm_notify);
+	if (!(host->pm_flags & MMC_PM_IGNORE_PM_NOTIFY))
+		unregister_pm_notifier(&host->pm_notify);
+
 	mmc_stop_host(host);
 
 #ifdef CONFIG_DEBUG_FS
 	mmc_remove_host_debugfs(host);
 #endif
+
+	mmc_latency_hist_sysfs_exit(host);
 
 	device_del(&host->class_dev);
 
@@ -589,6 +651,7 @@ EXPORT_SYMBOL(mmc_remove_host);
  */
 void mmc_free_host(struct mmc_host *host)
 {
+	/* HISI do not use power sequence */
 	mmc_pwrseq_free(host);
 	put_device(&host->class_dev);
 }

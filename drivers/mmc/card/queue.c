@@ -9,24 +9,30 @@
  * published by the Free Software Foundation.
  *
  */
+#include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/scatterlist.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
 #include <linux/dma-mapping.h>
+#endif
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 #include "queue.h"
 
+
+#ifdef CONFIG_MMC_BLOCK_BOUNCE
 #define MMC_QUEUE_BOUNCESZ	65536
+#endif
 
 /*
  * Prepare a MMC request. This just filters out odd stuff.
  */
-static int mmc_prep_request(struct request_queue *q, struct request *req)
+int mmc_prep_request(struct request_queue *q, struct request *req)
 {
 	struct mmc_queue *mq = q->queuedata;
 
@@ -69,10 +75,8 @@ static int mmc_queue_thread(void *d)
 			set_current_state(TASK_RUNNING);
 			cmd_flags = req ? req->cmd_flags : 0;
 			mq->issue_fn(mq, req);
-			if (mq->flags & MMC_QUEUE_NEW_REQUEST) {
-				mq->flags &= ~MMC_QUEUE_NEW_REQUEST;
+			if(test_and_clear_bit(MMC_QUEUE_NEW_REQUEST_BIT, &mq->flags))
 				continue; /* fetch again */
-			}
 
 			/*
 			 * Current request becomes previous request
@@ -142,7 +146,7 @@ static void mmc_request_fn(struct request_queue *q)
 		wake_up_process(mq->thread);
 }
 
-static struct scatterlist *mmc_alloc_sg(int sg_len, int *err)
+struct scatterlist *mmc_alloc_sg(int sg_len, int *err)
 {
 	struct scatterlist *sg;
 
@@ -157,7 +161,7 @@ static struct scatterlist *mmc_alloc_sg(int sg_len, int *err)
 	return sg;
 }
 
-static void mmc_queue_setup_discard(struct request_queue *q,
+void mmc_queue_setup_discard(struct request_queue *q,
 				    struct mmc_card *card)
 {
 	unsigned max_discard;
@@ -167,7 +171,7 @@ static void mmc_queue_setup_discard(struct request_queue *q,
 		return;
 
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
-	q->limits.max_discard_sectors = max_discard;
+	blk_queue_max_discard_sectors(q, max_discard);
 	if (card->erased_byte == 0 && !mmc_can_discard(card))
 		q->limits.discard_zeroes_data = 1;
 	q->limits.discard_granularity = card->pref_erase << 9;
@@ -176,6 +180,18 @@ static void mmc_queue_setup_discard(struct request_queue *q,
 		q->limits.discard_granularity = 0;
 	if (mmc_can_secure_erase_trim(card))
 		queue_flag_set_unlocked(QUEUE_FLAG_SECDISCARD, q);
+}
+
+static void hisi_mmc_queue_init_tags(struct mmc_queue *mq, struct mmc_card *card)
+{
+	int ret;
+
+	if(card->mmc_tags){
+		ret = blk_queue_init_tags(mq->queue, card->mmc_tags_depth, card->mmc_tags, 0);
+		if(ret)
+			pr_warn("%s: blk_queue_init_tags failed!\n", mmc_card_name(card));
+	}
+
 }
 
 /**
@@ -188,21 +204,33 @@ static void mmc_queue_setup_discard(struct request_queue *q,
  * Initialise a MMC card request queue.
  */
 int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
-		   spinlock_t *lock, const char *subname)
+		   spinlock_t *lock, const char *subname, int area_type)
 {
 	struct mmc_host *host = card->host;
-	u64 limit = BLK_BOUNCE_HIGH;
+	u64 limit = BLK_BOUNCE_HIGH;/*lint !e501 */
 	int ret;
 	struct mmc_queue_req *mqrq_cur = &mq->mqrq[0];
 	struct mmc_queue_req *mqrq_prev = &mq->mqrq[1];
 
 	if (mmc_dev(host)->dma_mask && *mmc_dev(host)->dma_mask)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
 		limit = (u64)dma_max_pfn(mmc_dev(host)) << PAGE_SHIFT;
-
+#else
+		limit = *mmc_dev(host)->dma_mask;
+#endif
 	mq->card = card;
+#ifdef CONFIG_MMC_CQ_HCI
+	if (card->ext_csd.cmdq_mode_en
+		&& (area_type == MMC_BLK_DATA_AREA_MAIN)) {
+		ret = mmc_cmdq_init_queue(mq, card, lock);
+		return ret;
+	}
+#endif
 	mq->queue = blk_init_queue(mmc_request_fn, lock);
 	if (!mq->queue)
 		return -ENOMEM;
+
+	hisi_mmc_queue_init_tags(mq, card);
 
 	mq->mqrq_cur = mqrq_cur;
 	mq->mqrq_prev = mqrq_prev;
@@ -210,7 +238,9 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 
 	blk_queue_prep_rq(mq->queue, mmc_prep_request);
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, mq->queue);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0))
 	queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, mq->queue);
+#endif
 	if (mmc_can_erase(card))
 		mmc_queue_setup_discard(mq->queue, card);
 
@@ -407,25 +437,42 @@ void mmc_packed_clean(struct mmc_queue *mq)
 /**
  * mmc_queue_suspend - suspend a MMC request queue
  * @mq: MMC queue to suspend
- *
+ * @wait: whether need to wait lock
+ * shutdown:need  suspend:noneed
  * Stop the block request queue, and wait for our thread to
  * complete any outstanding requests.  This ensures that we
  * won't suspend while a request is being processed.
  */
-void mmc_queue_suspend(struct mmc_queue *mq)
+int mmc_queue_suspend(struct mmc_queue *mq,int wait)
 {
 	struct request_queue *q = mq->queue;
 	unsigned long flags;
+	int rc = 0;
 
-	if (!(mq->flags & MMC_QUEUE_SUSPENDED)) {
-		mq->flags |= MMC_QUEUE_SUSPENDED;
+	if (!test_and_set_bit(MMC_QUEUE_SUSPENDED_BIT, &mq->flags)) {
 
 		spin_lock_irqsave(q->queue_lock, flags);
 		blk_stop_queue(q);
 		spin_unlock_irqrestore(q->queue_lock, flags);
 
-		down(&mq->thread_sem);
+		rc = down_trylock(&mq->thread_sem);
+		if (rc && !wait){
+			pr_err("fail to down sem in mmc_queue_suspend");
+			/*
+			 * Failed to take the lock so better to abort the
+			 * suspend because mmcqd thread is processing requests.
+			 */
+			clear_bit(MMC_QUEUE_SUSPENDED, &mq->flags);
+			spin_lock_irqsave(q->queue_lock, flags);
+			blk_start_queue(q);
+			spin_unlock_irqrestore(q->queue_lock, flags);
+			rc = -EBUSY;
+		} else if (rc && wait) {
+			down(&mq->thread_sem);
+			rc = 0;
+		}
 	}
+	return rc;
 }
 
 /**
@@ -437,8 +484,7 @@ void mmc_queue_resume(struct mmc_queue *mq)
 	struct request_queue *q = mq->queue;
 	unsigned long flags;
 
-	if (mq->flags & MMC_QUEUE_SUSPENDED) {
-		mq->flags &= ~MMC_QUEUE_SUSPENDED;
+	if (test_and_clear_bit(MMC_QUEUE_SUSPENDED_BIT, &mq->flags)) {
 
 		up(&mq->thread_sem);
 
@@ -492,7 +538,7 @@ unsigned int mmc_queue_map_sg(struct mmc_queue *mq, struct mmc_queue_req *mqrq)
 	size_t buflen;
 	struct scatterlist *sg;
 	enum mmc_packed_type cmd_type;
-	int i;
+	unsigned int i;
 
 	cmd_type = mqrq->cmd_type;
 
@@ -501,7 +547,7 @@ unsigned int mmc_queue_map_sg(struct mmc_queue *mq, struct mmc_queue_req *mqrq)
 			return mmc_queue_packed_map_sg(mq, mqrq->packed,
 						       mqrq->sg, cmd_type);
 		else
-			return blk_rq_map_sg(mq->queue, mqrq->req, mqrq->sg);
+			return (unsigned int)blk_rq_map_sg(mq->queue, mqrq->req, mqrq->sg);
 	}
 
 	BUG_ON(!mqrq->bounce_sg);

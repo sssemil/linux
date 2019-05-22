@@ -37,12 +37,14 @@ static struct mmc_pwrseq_match *mmc_pwrseq_find(struct device_node *np)
 	struct mmc_pwrseq_match *match = ERR_PTR(-ENODEV);
 	int i;
 
+	/*lint -save -e574*/
 	for (i = 0; i < ARRAY_SIZE(pwrseq_match); i++) {
 		if (of_device_is_compatible(np,	pwrseq_match[i].compatible)) {
 			match = &pwrseq_match[i];
 			break;
 		}
 	}
+	/*lint -restore*/
 
 	return match;
 }

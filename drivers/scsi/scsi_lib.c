@@ -23,6 +23,9 @@
 #include <linux/scatterlist.h>
 #include <linux/blk-mq.h>
 #include <linux/ratelimit.h>
+#ifdef CONFIG_SCSI_HISI_MQ
+#include <linux/hisi-blk-mq.h>
+#endif
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -583,7 +586,7 @@ static struct scatterlist *scsi_sg_alloc(unsigned int nents, gfp_t gfp_mask)
 
 static void scsi_free_sgtable(struct scsi_data_buffer *sdb, bool mq)
 {
-	if (mq && sdb->table.nents <= SCSI_MAX_SG_SEGMENTS)
+	if (mq && sdb->table.orig_nents <= SCSI_MAX_SG_SEGMENTS)
 		return;
 	__sg_free_table(&sdb->table, SCSI_MAX_SG_SEGMENTS, mq, scsi_sg_free);
 }
@@ -597,8 +600,8 @@ static int scsi_alloc_sgtable(struct scsi_data_buffer *sdb, int nents, bool mq)
 
 	if (mq) {
 		if (nents <= SCSI_MAX_SG_SEGMENTS) {
-			sdb->table.nents = nents;
-			sg_init_table(sdb->table.sgl, sdb->table.nents);
+			sdb->table.nents = sdb->table.orig_nents = nents;
+			sg_init_table(sdb->table.sgl, nents);
 			return 0;
 		}
 		first_chunk = sdb->table.sgl;
@@ -1617,6 +1620,11 @@ static void scsi_softirq_done(struct request *rq)
 	struct scsi_cmnd *cmd = rq->special;
 	unsigned long wait_for = (cmd->allowed + 1) * rq->timeout;
 	int disposition;
+#ifdef CONFIG_SCSI_HISI_MQ
+	if(rq->q->mq_ops){
+		scsi_dma_unmap(cmd);
+	}
+#endif
 
 	INIT_LIST_HEAD(&cmd->eh_entry);
 
@@ -2006,7 +2014,9 @@ static int scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	reason = scsi_dispatch_cmd(cmd);
 	if (reason) {
+	#ifndef CONFIG_SCSI_HISI_MQ
 		scsi_set_blocked(cmd, reason);
+	#endif
 		ret = BLK_MQ_RQ_QUEUE_BUSY;
 		goto out_dec_host_busy;
 	}
@@ -2024,12 +2034,14 @@ out_put_device:
 	put_device(&sdev->sdev_gendev);
 out:
 	switch (ret) {
+		#ifndef CONFIG_SCSI_HISI_MQ
 	case BLK_MQ_RQ_QUEUE_BUSY:
 		blk_mq_stop_hw_queue(hctx);
 		if (atomic_read(&sdev->device_busy) == 0 &&
 		    !scsi_device_blocked(sdev))
 			blk_mq_delay_queue(hctx, SCSI_QUEUE_DELAY);
 		break;
+		#endif
 	case BLK_MQ_RQ_QUEUE_ERROR:
 		/*
 		 * Make sure to release all allocated ressources when
@@ -2095,6 +2107,32 @@ static u64 scsi_calculate_bounce_limit(struct Scsi_Host *shost)
 	return bounce_limit;
 }
 
+#ifdef CONFIG_SCSI_HISI_MQ
+static void scsi_queue_statistics(struct request_queue *q,struct blkdev_statistics_info *info)
+{
+	struct scsi_device *sdev = q->queuedata;
+	struct Scsi_Host *shost = sdev->host;
+	shost->hostt->statistics_report(shost,info);
+}
+
+static int scsi_io_schedule(struct blk_dispatch_decision_para *p,int (* condition)(struct blk_dispatch_decision_para *))
+{
+	struct scsi_device *sdev = p->queue->queuedata;
+	struct Scsi_Host *shost = sdev->host;
+	return shost->hostt->wait_io_schedule(shost,p,condition);
+}
+
+static int scsi_direct_flush(struct request_queue *q, int normal)
+{
+	struct scsi_device *sdev = q->queuedata;
+	if(sdev->type != TYPE_DISK || sdev->host->hostt->direct_flush == NULL)
+		return BLK_MQ_RQ_QUEUE_ERROR;
+	if(sdev->host->host_self_blocked || sdev->sdev_state != SDEV_RUNNING)
+		return BLK_MQ_RQ_QUEUE_ERROR;
+	return sdev->host->hostt->direct_flush(sdev,normal);
+}
+#endif
+
 static void __scsi_init_queue(struct Scsi_Host *shost, struct request_queue *q)
 {
 	struct device *dev = shost->dma_dev;
@@ -2129,6 +2167,31 @@ static void __scsi_init_queue(struct Scsi_Host *shost, struct request_queue *q)
 	 * blk_queue_update_dma_alignment() later.
 	 */
 	blk_queue_dma_alignment(q, 0x03);
+#ifdef CONFIG_SCSI_HISI_MQ
+	if(shost->mq_quirk_flag & SHOST_MQ_QUIRK(SHOST_MQ_QUIRK_FORCE_SAME_CPU)){
+		queue_flag_set_unlocked(QUEUE_FLAG_SAME_FORCE, q);
+	}
+	if(shost->mq_quirk_flag & SHOST_MQ_QUIRK(SHOST_MQ_QUIRK_FORCE_DISPATCH_CTX)){
+		hisi_blk_mq_set_queue_quirk(q, HISI_MQ_FORCE_DISPATCH_CTX);
+	}
+	if(shost->mq_quirk_flag & SHOST_MQ_QUIRK(SHOST_MQ_QUIRK_FORCE_SOFT_IRQ)){
+		hisi_blk_mq_set_queue_quirk(q, HISI_MQ_FORCE_SOFTIRQ);
+	}
+	if(shost->mq_quirk_flag & SHOST_MQ_QUIRK(SHOST_MQ_QUIRK_DISPATCH_DICISION)){
+		hisi_blk_mq_set_queue_quirk(q, HISI_MQ_DISPATCH_DICISION);
+	}
+	blk_direct_flush_register(q,shost->hostt->direct_flush ? scsi_direct_flush : NULL);
+	blk_flush_reduce(q,(shost->mq_quirk_flag & SHOST_MQ_QUIRK(SHOST_MQ_QUIRK_FLUSH_REDUCING)) ? 1U : 0U);
+#endif
+#ifdef CONFIG_HISI_BLK_CORE
+	if(shost->hisi_scsi_host_flag & HISI_SCSI_HOST_BUSY_IDLE_EN)
+		blk_queue_busy_idle_enable(q,1);
+	else
+		blk_queue_busy_idle_enable(q,0);
+
+	blk_queue_hw_bkops_support(q,0);
+#endif
+
 }
 
 struct request_queue *__scsi_alloc_queue(struct Scsi_Host *shost,
@@ -2193,9 +2256,25 @@ int scsi_mq_setup_tags(struct Scsi_Host *shost)
 		cmd_size += sizeof(struct scsi_data_buffer) + sgl_size;
 
 	memset(&shost->tag_set, 0, sizeof(shost->tag_set));
+#ifdef CONFIG_SCSI_HISI_MQ
+	shost->tag_set.ops = kzalloc_node(sizeof(struct blk_mq_ops), GFP_KERNEL, NUMA_NO_NODE);
+	shost->tag_set.ops->map_queue = scsi_mq_ops.map_queue;
+	shost->tag_set.ops->queue_rq = scsi_mq_ops.queue_rq;
+	shost->tag_set.ops->complete = scsi_mq_ops.complete;
+	shost->tag_set.ops->timeout = scsi_mq_ops.timeout;
+	shost->tag_set.ops->init_request = scsi_mq_ops.init_request;
+	shost->tag_set.ops->exit_request = scsi_mq_ops.exit_request;
+	if(shost->hostt->wait_io_schedule)
+		shost->tag_set.ops->queue_io_wait = scsi_io_schedule;
+	if(shost->hostt->statistics_report)
+		shost->tag_set.ops->queue_statistics = scsi_queue_statistics;
+	shost->tag_set.nr_hw_queues = shost->nr_hw_queues ? : 1;
+	shost->tag_set.queue_depth = shost->mq_queue_depth ? shost->mq_queue_depth : shost->can_queue;
+#else
 	shost->tag_set.ops = &scsi_mq_ops;
 	shost->tag_set.nr_hw_queues = shost->nr_hw_queues ? : 1;
 	shost->tag_set.queue_depth = shost->can_queue;
+#endif
 	shost->tag_set.cmd_size = cmd_size;
 	shost->tag_set.numa_node = NUMA_NO_NODE;
 	shost->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_SG_MERGE;
@@ -2209,6 +2288,9 @@ int scsi_mq_setup_tags(struct Scsi_Host *shost)
 void scsi_mq_destroy_tags(struct Scsi_Host *shost)
 {
 	blk_mq_free_tag_set(&shost->tag_set);
+#ifdef CONFIG_SCSI_HISI_MQ
+	kfree(shost->tag_set.ops);
+#endif
 }
 
 /*

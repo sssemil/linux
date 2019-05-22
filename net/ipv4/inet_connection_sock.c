@@ -25,6 +25,14 @@
 #include <net/xfrm.h>
 #include <net/tcp.h>
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+#include <net/tcp_crosslayer.h>
+#endif
+
+#ifdef CONFIG_HW_QTAGUID_PID
+#include <huawei_platform/net/qtaguid_pid/qtaguid_pid.h>
+#endif
+
 #ifdef INET_CSK_DEBUG
 const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
 EXPORT_SYMBOL(inet_csk_timer_bug_msg);
@@ -413,7 +421,7 @@ struct dst_entry *inet_csk_route_req(struct sock *sk,
 			   sk->sk_protocol, inet_sk_flowi_flags(sk),
 			   (opt && opt->opt.srr) ? opt->opt.faddr : ireq->ir_rmt_addr,
 			   ireq->ir_loc_addr, ireq->ir_rmt_port,
-			   htons(ireq->ir_num));
+			   htons(ireq->ir_num), sock_i_uid(sk));
 	security_req_classify_flow(req, flowi4_to_flowi(fl4));
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
@@ -450,7 +458,7 @@ struct dst_entry *inet_csk_route_child_sock(struct sock *sk,
 			   sk->sk_protocol, inet_sk_flowi_flags(sk),
 			   (opt && opt->opt.srr) ? opt->opt.faddr : ireq->ir_rmt_addr,
 			   ireq->ir_loc_addr, ireq->ir_rmt_port,
-			   htons(ireq->ir_num));
+			   htons(ireq->ir_num), sock_i_uid(sk));
 	security_req_classify_flow(req, flowi4_to_flowi(fl4));
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
@@ -568,23 +576,24 @@ EXPORT_SYMBOL(inet_rtx_syn_ack);
 static bool reqsk_queue_unlink(struct request_sock_queue *queue,
 			       struct request_sock *req)
 {
-	struct listen_sock *lopt = queue->listen_opt;
 	struct request_sock **prev;
+	struct listen_sock *lopt;
 	bool found = false;
 
 	spin_lock(&queue->syn_wait_lock);
-
-	for (prev = &lopt->syn_table[req->rsk_hash]; *prev != NULL;
-	     prev = &(*prev)->dl_next) {
-		if (*prev == req) {
-			*prev = req->dl_next;
-			found = true;
-			break;
+	lopt = queue->listen_opt;
+	if (lopt) {
+		for (prev = &lopt->syn_table[req->rsk_hash]; *prev != NULL;
+		     prev = &(*prev)->dl_next) {
+			if (*prev == req) {
+				*prev = req->dl_next;
+				found = true;
+				break;
+			}
 		}
 	}
-
 	spin_unlock(&queue->syn_wait_lock);
-	if (del_timer(&req->rsk_timer))
+	if (timer_pending(&req->rsk_timer) && del_timer_sync(&req->rsk_timer))
 		reqsk_put(req);
 	return found;
 }
@@ -676,20 +685,20 @@ void reqsk_queue_hash_req(struct request_sock_queue *queue,
 	req->num_timeout = 0;
 	req->sk = NULL;
 
+	setup_timer(&req->rsk_timer, reqsk_timer_handler, (unsigned long)req);
+	mod_timer_pinned(&req->rsk_timer, jiffies + timeout);
+	req->rsk_hash = hash;
+
 	/* before letting lookups find us, make sure all req fields
 	 * are committed to memory and refcnt initialized.
 	 */
 	smp_wmb();
 	atomic_set(&req->rsk_refcnt, 2);
-	setup_timer(&req->rsk_timer, reqsk_timer_handler, (unsigned long)req);
-	req->rsk_hash = hash;
 
 	spin_lock(&queue->syn_wait_lock);
 	req->dl_next = lopt->syn_table[hash];
 	lopt->syn_table[hash] = req;
 	spin_unlock(&queue->syn_wait_lock);
-
-	mod_timer_pinned(&req->rsk_timer, jiffies + timeout);
 }
 EXPORT_SYMBOL(reqsk_queue_hash_req);
 
@@ -752,6 +761,13 @@ void inet_csk_destroy_sock(struct sock *sk)
 	/* If it has not 0 inet_sk(sk)->inet_num, it must be bound */
 	WARN_ON(inet_sk(sk)->inet_num && !inet_csk(sk)->icsk_bind_hash);
 
+#ifdef CONFIG_HW_QTAGUID_PID
+	qtaguid_pid_remove(sk);
+#endif
+
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	aspen_unmark_hashtable(sk);
+#endif
 	sk->sk_prot->destroy(sk);
 
 	sk_stream_kill_queues(sk);

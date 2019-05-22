@@ -179,7 +179,12 @@ armpmu_event_set_period(struct perf_event *event,
 	 */
 	if (left > (armpmu->max_period >> 1))
 		left = armpmu->max_period >> 1;
-
+#ifdef CONFIG_HISI_HW_PERF_EVENTS
+	if (left < (s64)armpmu->min_period){
+		left = (s64)armpmu->min_period;
+		local64_set(&hwc->period_left, left);
+	}
+#endif
 	local64_set(&hwc->prev_count, (u64)-left);
 
 	armpmu->write_counter(idx, (u64)(-left) & 0xffffffff);
@@ -576,7 +581,11 @@ __hw_perf_event_init(struct perf_event *event)
 		hwc->last_period    = hwc->sample_period;
 		local64_set(&hwc->period_left, hwc->sample_period);
 	}
-
+#ifdef CONFIG_HISI_HW_PERF_EVENTS
+	if (hwc->sample_period < armpmu->min_period){
+		hwc->sample_period = armpmu->min_period;
+	}
+#endif
 	err = 0;
 	if (event->group_leader != event) {
 		err = validate_group(event);
@@ -704,12 +713,26 @@ enum armv8_pmuv3_perf_types {
 /* PMUv3 HW events mapping. */
 static const unsigned armv8_pmuv3_perf_map[PERF_COUNT_HW_MAX] = {
 	[PERF_COUNT_HW_CPU_CYCLES]		= ARMV8_PMUV3_PERFCTR_CLOCK_CYCLES,
+/*
+* simpleperf test will trigger system reset @ 100% rate, so we need close it:
+* simpleperf record -e instructions -a -o /data/perf.data -c 20
+* So, we will close hw events by default
+*/
+#ifdef CONFIG_HISI_HW_PERF_EVENTS
+	[PERF_COUNT_HW_INSTRUCTIONS]		= HW_OP_UNSUPPORTED,
+	[PERF_COUNT_HW_CACHE_REFERENCES]	= HW_OP_UNSUPPORTED,
+	[PERF_COUNT_HW_CACHE_MISSES]		= HW_OP_UNSUPPORTED,
+	[PERF_COUNT_HW_BRANCH_INSTRUCTIONS]	= HW_OP_UNSUPPORTED,
+	[PERF_COUNT_HW_BRANCH_MISSES]		= HW_OP_UNSUPPORTED,
+	[PERF_COUNT_HW_BUS_CYCLES]		= HW_OP_UNSUPPORTED,
+#else
 	[PERF_COUNT_HW_INSTRUCTIONS]		= ARMV8_PMUV3_PERFCTR_INSTR_EXECUTED,
 	[PERF_COUNT_HW_CACHE_REFERENCES]	= ARMV8_PMUV3_PERFCTR_L1_DCACHE_ACCESS,
 	[PERF_COUNT_HW_CACHE_MISSES]		= ARMV8_PMUV3_PERFCTR_L1_DCACHE_REFILL,
 	[PERF_COUNT_HW_BRANCH_INSTRUCTIONS]	= HW_OP_UNSUPPORTED,
 	[PERF_COUNT_HW_BRANCH_MISSES]		= ARMV8_PMUV3_PERFCTR_PC_BRANCH_MIS_PRED,
 	[PERF_COUNT_HW_BUS_CYCLES]		= HW_OP_UNSUPPORTED,
+#endif
 	[PERF_COUNT_HW_STALLED_CYCLES_FRONTEND]	= HW_OP_UNSUPPORTED,
 	[PERF_COUNT_HW_STALLED_CYCLES_BACKEND]	= HW_OP_UNSUPPORTED,
 };
@@ -1242,9 +1265,6 @@ static void armv8pmu_reset(void *info)
 
 	/* Initialize & Reset PMNC: C and P bits. */
 	armv8pmu_pmcr_write(ARMV8_PMCR_P | ARMV8_PMCR_C);
-
-	/* Disable access from userspace. */
-	asm volatile("msr pmuserenr_el0, %0" :: "r" (0));
 }
 
 static int armv8_pmuv3_map_event(struct perf_event *event)
@@ -1265,6 +1285,9 @@ static struct arm_pmu armv8pmu = {
 	.stop			= armv8pmu_stop,
 	.reset			= armv8pmu_reset,
 	.max_period		= (1LLU << 32) - 1,
+#ifdef CONFIG_HISI_HW_PERF_EVENTS
+	.min_period		= 0xfffff,
+#endif
 };
 
 static u32 __init armv8pmu_read_num_pmnc_events(void)
@@ -1318,7 +1341,7 @@ static int armpmu_device_probe(struct platform_device *pdev)
 	/* Don't bother with PPIs; they're already affine */
 	irq = platform_get_irq(pdev, 0);
 	if (irq >= 0 && irq_is_percpu(irq))
-		return 0;
+		goto out;
 
 	irqs = kcalloc(pdev->num_resources, sizeof(*irqs), GFP_KERNEL);
 	if (!irqs)
@@ -1355,6 +1378,7 @@ static int armpmu_device_probe(struct platform_device *pdev)
 	else
 		kfree(irqs);
 
+out:
 	cpu_pmu->plat_device = pdev;
 	return 0;
 }
@@ -1392,9 +1416,9 @@ static void __init cpu_pmu_init(struct arm_pmu *armpmu)
 
 static int __init init_hw_perf_events(void)
 {
-	u64 dfr = read_cpuid(ID_AA64DFR0_EL1);
+	u64 dfr = read_system_reg(SYS_ID_AA64DFR0_EL1);
 
-	switch ((dfr >> 8) & 0xf) {
+	switch (cpuid_feature_extract_field(dfr, ID_AA64DFR0_PMUVER_SHIFT)) {
 	case 0x1:	/* PMUv3 */
 		cpu_pmu = armv8_pmuv3_pmu_init();
 		break;

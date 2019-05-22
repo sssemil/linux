@@ -92,11 +92,11 @@ void pci_bus_remove_resources(struct pci_bus *bus)
 }
 
 static struct pci_bus_region pci_32_bit = {0, 0xffffffffULL};
-#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
+#ifdef CONFIG_PCI_BUS_ADDR_T_64BIT
 static struct pci_bus_region pci_64_bit = {0,
-				(dma_addr_t) 0xffffffffffffffffULL};
-static struct pci_bus_region pci_high = {(dma_addr_t) 0x100000000ULL,
-				(dma_addr_t) 0xffffffffffffffffULL};
+				(pci_bus_addr_t) 0xffffffffffffffffULL};
+static struct pci_bus_region pci_high = {(pci_bus_addr_t) 0x100000000ULL,
+				(pci_bus_addr_t) 0xffffffffffffffffULL};
 #endif
 
 /*
@@ -200,7 +200,7 @@ int pci_bus_alloc_resource(struct pci_bus *bus, struct resource *res,
 					  resource_size_t),
 		void *alignf_data)
 {
-#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
+#ifdef CONFIG_PCI_BUS_ADDR_T_64BIT
 	int rc;
 
 	if (res->flags & IORESOURCE_MEM_64) {
@@ -256,6 +256,8 @@ bool pci_bus_clip_resource(struct pci_dev *dev, int idx)
 
 		res->start = start;
 		res->end = end;
+		res->flags &= ~IORESOURCE_UNSET;
+		orig_res.flags &= ~IORESOURCE_UNSET;
 		dev_printk(KERN_DEBUG, &dev->dev, "%pR clipped to %pR\n",
 				 &orig_res, res);
 
@@ -282,9 +284,10 @@ void pci_bus_add_device(struct pci_dev *dev)
 	 * are not assigned yet for some devices.
 	 */
 	pci_fixup_device(pci_fixup_final, dev);
+#ifndef CONFIG_PCIE_KIRIN
 	pci_create_sysfs_dev_files(dev);
 	pci_proc_attach_device(dev);
-
+#endif
 	dev->match_driver = true;
 	retval = device_attach(&dev->dev);
 	WARN_ON(retval < 0);

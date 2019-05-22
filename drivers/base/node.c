@@ -70,6 +70,12 @@ static ssize_t node_read_meminfo(struct device *dev,
 		       "Node %d Active(file):   %8lu kB\n"
 		       "Node %d Inactive(file): %8lu kB\n"
 		       "Node %d Unevictable:    %8lu kB\n"
+#ifdef CONFIG_TASK_PROTECT_LRU
+		       "Node %d Active(prot_anon):   %8lu kB\n"
+		       "Node %d Inactive(prot_anon): %8lu kB\n"
+		       "Node %d Active(prot_file):   %8lu kB\n"
+		       "Node %d Inactive(prot_file): %8lu kB\n"
+#endif
 		       "Node %d Mlocked:        %8lu kB\n",
 		       nid, K(i.totalram),
 		       nid, K(i.freeram),
@@ -83,6 +89,12 @@ static ssize_t node_read_meminfo(struct device *dev,
 		       nid, K(node_page_state(nid, NR_ACTIVE_FILE)),
 		       nid, K(node_page_state(nid, NR_INACTIVE_FILE)),
 		       nid, K(node_page_state(nid, NR_UNEVICTABLE)),
+#ifdef CONFIG_TASK_PROTECT_LRU
+		       nid, K(node_page_state(nid, NR_PROTECT_ACTIVE_ANON)),
+		       nid, K(node_page_state(nid, NR_PROTECT_INACTIVE_ANON)),
+		       nid, K(node_page_state(nid, NR_PROTECT_ACTIVE_FILE)),
+		       nid, K(node_page_state(nid, NR_PROTECT_INACTIVE_FILE)),
+#endif
 		       nid, K(node_page_state(nid, NR_MLOCK)));
 
 #ifdef CONFIG_HIGHMEM
@@ -387,6 +399,16 @@ int register_mem_sect_under_node(struct memory_block *mem_blk, int nid)
 	sect_end_pfn += PAGES_PER_SECTION - 1;
 	for (pfn = sect_start_pfn; pfn <= sect_end_pfn; pfn++) {
 		int page_nid;
+
+		/*
+		 * memory block could have several absent sections from start.
+		 * skip pfn range from absent section
+		 */
+		if (!pfn_present(pfn)) {
+			pfn = round_down(pfn + PAGES_PER_SECTION,
+					 PAGES_PER_SECTION) - 1;
+			continue;
+		}
 
 		page_nid = get_nid_for_pfn(pfn);
 		if (page_nid < 0)

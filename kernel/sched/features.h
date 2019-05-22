@@ -36,10 +36,12 @@ SCHED_FEAT(CACHE_HOT_BUDDY, true)
  */
 SCHED_FEAT(WAKEUP_PREEMPTION, true)
 
+#ifdef CONFIG_SCHED_HMP
 /*
  * Use arch dependent cpu capacity functions
  */
 SCHED_FEAT(ARCH_CAPACITY, true)
+#endif
 
 SCHED_FEAT(HRTICK, false)
 SCHED_FEAT(DOUBLE_TICK, false)
@@ -72,6 +74,14 @@ SCHED_FEAT(RT_PUSH_IPI, true)
 SCHED_FEAT(FORCE_SD_OVERLAP, false)
 SCHED_FEAT(RT_RUNTIME_SHARE, true)
 SCHED_FEAT(LB_MIN, false)
+
+SCHED_FEAT(ATTACH_AGE_LOAD, true)
+
+/*
+ * Energy aware scheduling. Use platform energy model to guide scheduling
+ * decisions optimizing for energy efficiency.
+ */
+SCHED_FEAT(ENERGY_AWARE, true)
 
 /*
  * Apply the automatic NUMA scheduling policy. Enabled automatically

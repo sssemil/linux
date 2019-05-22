@@ -13,6 +13,9 @@
 #include <linux/rwsem.h>
 #include <linux/hugetlb.h>
 #include <asm/pgtable.h>
+#ifdef CONFIG_HW_STAT_MM
+#include <huawei_platform/linux/stat_mm.h>
+#endif
 
 #include "internal.h"
 
@@ -30,6 +33,16 @@ static struct page *no_page_table(struct vm_area_struct *vma,
 	if ((flags & FOLL_DUMP) && (!vma->vm_ops || !vma->vm_ops->fault))
 		return ERR_PTR(-EFAULT);
 	return NULL;
+}
+
+/*
+ * FOLL_FORCE can write to even unwritable pte's, but only
+ * after we've gone through a COW cycle and they are dirty.
+ */
+static inline bool can_follow_write_pte(pte_t pte, unsigned int flags)
+{
+	return pte_write(pte) ||
+		((flags & FOLL_FORCE) && (flags & FOLL_COW) && pte_dirty(pte));
 }
 
 static struct page *follow_page_pte(struct vm_area_struct *vma,
@@ -66,7 +79,7 @@ retry:
 	}
 	if ((flags & FOLL_NUMA) && pte_protnone(pte))
 		goto no_page;
-	if ((flags & FOLL_WRITE) && !pte_write(pte)) {
+	if ((flags & FOLL_WRITE) && !can_follow_write_pte(pte, flags)) {
 		pte_unmap_unlock(ptep, ptl);
 		return NULL;
 	}
@@ -315,7 +328,7 @@ static int faultin_page(struct task_struct *tsk, struct vm_area_struct *vma,
 	 * reCOWed by userspace write).
 	 */
 	if ((ret & VM_FAULT_WRITE) && !(vma->vm_flags & VM_WRITE))
-		*flags &= ~FOLL_WRITE;
+	        *flags |= FOLL_COW;
 	return 0;
 }
 
@@ -933,6 +946,9 @@ int __mm_populate(unsigned long start, unsigned long len, int ignore_errors)
 	}
 	if (locked)
 		up_read(&mm->mmap_sem);
+#ifdef CONFIG_HW_STAT_MM
+	STAT_MM_MLOCK_IF(start, len, current->mm->locked_vm);
+#endif
 	return ret;	/* 0 or negative error code */
 }
 

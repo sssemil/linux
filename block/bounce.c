@@ -127,15 +127,14 @@ static void bounce_end_io(struct bio *bio, mempool_t *pool, int err)
 	struct bio *bio_orig = bio->bi_private;
 	struct bio_vec *bvec, *org_vec;
 	int i;
-
-	if (test_bit(BIO_EOPNOTSUPP, &bio->bi_flags))
-		set_bit(BIO_EOPNOTSUPP, &bio_orig->bi_flags);
+	int start = bio_orig->bi_iter.bi_idx;
 
 	/*
 	 * free up bounce indirect pages used
 	 */
 	bio_for_each_segment_all(bvec, bio, i) {
-		org_vec = bio_orig->bi_io_vec + i;
+		org_vec = bio_orig->bi_io_vec + i + start;
+
 		if (bvec->bv_page == org_vec->bv_page)
 			continue;
 
@@ -239,6 +238,7 @@ bounce:
 	trace_block_bio_bounce(q, *bio_orig);
 
 	bio->bi_flags |= (1 << BIO_BOUNCED);
+	bio->io_in_count |= HISI_IO_IN_COUNT_SKIP_ENDIO;
 
 	if (pool == page_pool) {
 		bio->bi_end_io = bounce_end_io_write;

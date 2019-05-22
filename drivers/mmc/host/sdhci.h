@@ -87,8 +87,13 @@
 
 #define SDHCI_POWER_CONTROL	0x29
 #define  SDHCI_POWER_ON		0x01
+#ifdef CONFIG_MMC_SDHCI_DWC_MSHC
+#define  SDHCI_POWER_180	0x0C
+#define  SDHCI_POWER_300	0x0E
+#else
 #define  SDHCI_POWER_180	0x0A
 #define  SDHCI_POWER_300	0x0C
+#endif
 #define  SDHCI_POWER_330	0x0E
 
 #define SDHCI_BLOCK_GAP_CONTROL	0x2A
@@ -128,6 +133,7 @@
 #define  SDHCI_INT_CARD_INSERT	0x00000040
 #define  SDHCI_INT_CARD_REMOVE	0x00000080
 #define  SDHCI_INT_CARD_INT	0x00000100
+#define  SDHCI_INT_CMDQ		0x00004000
 #define  SDHCI_INT_ERROR	0x00008000
 #define  SDHCI_INT_TIMEOUT	0x00010000
 #define  SDHCI_INT_CRC		0x00020000
@@ -150,6 +156,8 @@
 		SDHCI_INT_DATA_TIMEOUT | SDHCI_INT_DATA_CRC | \
 		SDHCI_INT_DATA_END_BIT | SDHCI_INT_ADMA_ERROR | \
 		SDHCI_INT_BLK_GAP)
+
+#define SDHCI_INT_CMDQ_EN	(0x1 << 14)
 #define SDHCI_INT_ALL_MASK	((unsigned int)-1)
 
 #define SDHCI_ACMD12_ERR	0x3C
@@ -245,6 +253,8 @@
 #define SDHCI_PRESET_SDCLK_FREQ_MASK   0x3FF
 #define SDHCI_PRESET_SDCLK_FREQ_SHIFT	0
 
+#define SDHCI_ENHANCED_STROBE_EBABLE 0x78
+
 #define SDHCI_SLOT_INT_STATUS	0xFC
 
 #define SDHCI_HOST_VERSION	0xFE
@@ -255,6 +265,41 @@
 #define   SDHCI_SPEC_100	0
 #define   SDHCI_SPEC_200	1
 #define   SDHCI_SPEC_300	2
+
+#define SDHCI_CORE_CFG1						0x404
+#define SDHCI_CORE_CFG1_64BIT_SUPPORT		(0x1 << 31)
+
+#define SDHCI_DEBUG_REG0						0x420
+#define SDHCI_DEBUG_REG1						0x424
+#define SDHCI_DEBUG_REG2						0x428
+#define SDHCI_DEBUG_REG3						0x42C
+#define SDHCI_PHY_CTRL1							0x430
+#define SDHCI_PHY_CTRL2							0x434
+#define SDHCI_PHY_CTRL3							0x438
+#define SDHCI_PHY_STATUS						0x440
+#define SDHCI_PHY_CTRL1_ODEN_CMD				(0x1)
+#define SDHCI_PHY_CTRL1_EN_DLL					(0x1 << 7)
+#define SDHCI_PHY_CTRL1_DLL_TRIM_ICP			8
+#define SDHCI_PHY_CTRL1_DLL_TRIM_ICP_MASK	0xFF
+#define SDHCI_PHY_CTRL1_EN_RTRIM				(0x1 << 16)
+#define SDHCI_PHY_CTRL1_PDB					(0x1 << 25)
+#define SDHCI_PHY_CTRL1_DR_TY					22
+#define SDHCI_PHY_CTRL1_DR_TY_MASK			0x7
+#define SDHCI_PHY_CTRL2_ODEN_DAT				22
+#define SDHCI_PHY_CTRL3_STRBSEL_MASK			0xF
+#define SDHCI_PHY_CTRL3_STRBSEL				2
+#define SDHCI_PHY_CTRL3_OTAPDLYSEL				9
+#define SDHCI_PHY_CTRL3_OTAPDLYSEL_MASK		0xF
+#define SDHCI_PHY_CTRL3_OTAPDLYENA			(0x1 << 8)
+#define SDHCI_PHY_CTRL3_ITAPDLYSEL				15
+#define SDHCI_PHY_CTRL3_ITAPDLYSEL_MASK		0x1F
+#define SDHCI_PHY_CTRL3_ITAPDLYENA				(0x1 << 14)
+#define SDHCI_PHY_CTRL3_ITAPCHGWIN			(0x1 << 13)
+#define SDHCI_PHY_CTRL3_DLL_FREQ_SEL			28
+#define SDHCI_PHY_CTRL3_DLL_FREQ_SEL_MASK	0x7
+#define SDHCI_PHY_STATUS_EXR_NINST			(0x1)
+#define SDHCI_PHY_STATUS_DLLRDY				(0x1 << 1)
+#define SDHCI_PHY_STATUS_CALDONE				(0x1 << 6)
 
 /*
  * End of controller registers.
@@ -309,9 +354,10 @@ struct sdhci_adma2_64_desc {
  */
 #define SDHCI_MAX_SEGS		128
 
-struct sdhci_host_next {
-	unsigned int	sg_count;
-	s32		cookie;
+enum sdhci_cookie {
+	COOKIE_UNMAPPED,
+	COOKIE_MAPPED,
+	COOKIE_GIVEN,
 };
 
 struct sdhci_host {
@@ -409,9 +455,15 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_SUPPORT_SINGLE			(1<<13)
 /* Controller broken with using ACMD23 */
 #define SDHCI_QUIRK2_ACMD23_BROKEN			(1<<14)
+#define SDHCI_QUIRK2_USE_1_8_V_VMMC			(1<<15)
+/* use hisi combo phy testchip */
+#define SDHCI_QUIRK2_HISI_COMBO_PHY_TC		(1<<31)
 
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */
+	void __iomem *mmc_phy;
+	void __iomem *mmc_sys;
+	void __iomem *sysctrl;
 
 	const struct sdhci_ops *ops;	/* Low level hw interface */
 
@@ -441,6 +493,7 @@ struct sdhci_host {
 #define SDHCI_USING_RETUNING_TIMER (1<<11)	/* Host is using a retuning timer for the card */
 #define SDHCI_USE_64_BIT_DMA	(1<<12)	/* Use 64-bit DMA */
 #define SDHCI_HS400_TUNING	(1<<13)	/* Tuning for HS400 */
+#define SDHCI_EXE_SOFT_TUNING	(1<<14)	/* Host execute soft tuning */
 
 	unsigned int version;	/* SDHCI spec. version */
 
@@ -503,12 +556,21 @@ struct sdhci_host {
 
 	unsigned int		tuning_count;	/* Timer count for re-tuning */
 	unsigned int		tuning_mode;	/* Re-tuning mode supported by host */
-#define SDHCI_TUNING_MODE_1	0
+#define SDHCI_TUNING_MODE_1			0
+#define SDHCI_TUNING_MODE_2			1
+#define SDHCI_TUNING_MODE_3			2
+#define SDHCI_TUNING_MODE_RESERVED	3
 	struct timer_list	tuning_timer;	/* Timer for tuning */
+	struct cmdq_host	*cq_host;
+	struct i2c_client *i2c_client;
 
-	struct sdhci_host_next	next_data;
 	unsigned long private[0] ____cacheline_aligned;
 };
+
+#define TUNING_CLK 					0
+#define TUNING_STROBE 				1
+#define TUNING_FLAG_NOUSE			0
+#define TUNING_FLAG_CLEAR_COUNT	1
 
 struct sdhci_ops {
 #ifdef CONFIG_MMC_SDHCI_IO_ACCESSORS
@@ -540,7 +602,17 @@ struct sdhci_ops {
 	void    (*adma_workaround)(struct sdhci_host *host, u32 intmask);
 	void	(*platform_init)(struct sdhci_host *host);
 	void    (*card_event)(struct sdhci_host *host);
-	void	(*voltage_switch)(struct sdhci_host *host);
+	void    (*voltage_switch)(struct sdhci_host *host);
+	void	(*update_phy_control)(struct sdhci_host *host, unsigned char timing);
+	int	(*tuning_soft)(struct sdhci_host *host, u32 opcode, bool set);
+	int	(*tuning_move)(struct sdhci_host *host, int is_move_strobe, int flag);
+	int	(*enable_enhanced_strobe)(struct sdhci_host *host);
+	void	(*init_tuning_para)(struct sdhci_host *host);
+	void     (*check_busy_before_send_cmd)(struct sdhci_host *host,
+				struct mmc_command* cmd);
+	void (*restore_transfer_para)(struct sdhci_host *host);
+	void (*select_card_type)(struct sdhci_host *host);
+	void (*dumpregs)(struct sdhci_host *host);
 };
 
 #ifdef CONFIG_MMC_SDHCI_IO_ACCESSORS

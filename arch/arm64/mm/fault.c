@@ -29,15 +29,40 @@
 #include <linux/sched.h>
 #include <linux/highmem.h>
 #include <linux/perf_event.h>
+#include <linux/boost_sigkill_free.h>
 
+#include <asm/cpufeature.h>
 #include <asm/exception.h>
 #include <asm/debug-monitors.h>
 #include <asm/esr.h>
+#include <asm/sysreg.h>
 #include <asm/system_misc.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 
 static const char *fault_name(unsigned int esr);
+
+#ifdef CONFIG_KPROBES
+static inline int notify_page_fault(struct pt_regs *regs, unsigned int esr)
+{
+	int ret = 0;
+
+	/* kprobe_running() needs smp_processor_id() */
+	if (!user_mode(regs)) {
+		preempt_disable();
+		if (kprobe_running() && kprobe_fault_handler(regs, esr))
+			ret = 1;
+		preempt_enable();
+	}
+
+	return ret;
+}
+#else
+static inline int notify_page_fault(struct pt_regs *regs, unsigned int esr)
+{
+	return 0;
+}
+#endif
 
 /*
  * Dump out the page tables associated with 'addr' in mm 'mm'.
@@ -48,9 +73,15 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 	if (!mm)
 		mm = &init_mm;
-
 	pr_alert("pgd = %p\n", mm->pgd);
+#ifdef CONFIG_FREE_PAGES_RDONLY
+	if(addr >= VA_START)
+	        pgd = pgd_offset(&init_mm, addr);
+	else
+	        pgd = pgd_offset(mm, addr);
+#else
 	pgd = pgd_offset(mm, addr);
+#endif
 	pr_alert("[%08lx] *pgd=%016llx", addr, pgd_val(*pgd));
 
 	do {
@@ -160,6 +191,15 @@ static int __do_page_fault(struct mm_struct *mm, unsigned long addr,
 	struct vm_area_struct *vma;
 	int fault;
 
+#ifdef CONFIG_HW_BOOST_SIGKILL_FREE
+	if (unlikely(test_bit(MMF_FAST_FREEING, &mm->flags))) {
+		task_clear_jobctl_pending(tsk, JOBCTL_PENDING_MASK);
+		sigaddset(&tsk->pending.signal, SIGKILL);
+		set_tsk_thread_flag(tsk, TIF_SIGPENDING);
+		return VM_FAULT_BADMAP;
+	}
+#endif
+
 	vma = find_vma(mm, addr);
 	fault = VM_FAULT_BADMAP;
 	if (unlikely(!vma))
@@ -200,6 +240,9 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	unsigned long vm_flags = VM_READ | VM_WRITE | VM_EXEC;
 	unsigned int mm_flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
+	if (notify_page_fault(regs, esr))
+		return 0;
+
 	tsk = current;
 	mm  = tsk->mm;
 
@@ -223,6 +266,13 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 		vm_flags = VM_WRITE;
 		mm_flags |= FAULT_FLAG_WRITE;
 	}
+
+	/*
+	 * PAN bit set implies the fault happened in kernel space, but not
+	 * in the arch's user access functions.
+	 */
+	if (IS_ENABLED(CONFIG_ARM64_PAN) && (regs->pstate & PSR_PAN_BIT))
+		goto no_context;
 
 	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
@@ -279,6 +329,7 @@ retry:
 			 * starvation.
 			 */
 			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			mm_flags |= FAULT_FLAG_TRIED;
 			goto retry;
 		}
 	}
@@ -370,6 +421,11 @@ static int do_bad(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 	return 1;
 }
 
+#ifdef CONFIG_TLB_CONFLICT_WORKAROUND
+extern int do_tlb_conflict(unsigned long addr, unsigned int esr,
+			struct pt_regs *regs);
+#endif
+
 static struct fault_info {
 	int	(*fn)(unsigned long addr, unsigned int esr, struct pt_regs *regs);
 	int	sig;
@@ -424,7 +480,11 @@ static struct fault_info {
 	{ do_bad,		SIGBUS,  0,		"unknown 45"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 46"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 47"			},
+#ifdef CONFIG_TLB_CONFLICT_WORKAROUND
+	{ do_tlb_conflict,	SIGBUS,  0,		"tlb conflict"			},
+#else
 	{ do_bad,		SIGBUS,  0,		"unknown 48"			},
+#endif
 	{ do_bad,		SIGBUS,  0,		"unknown 49"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 50"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 51"			},
@@ -478,7 +538,15 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 					   struct pt_regs *regs)
 {
 	struct siginfo info;
+	int isize = 4;
 
+	if(compat_user_mode(regs) && !compat_thumb_mode(regs)) {
+		/*
+		 * Force align the pc in arm A53 architecture aarch64
+		 */
+		regs->pc &= ~(isize + (-1UL));
+		return ;
+	}
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code  = BUS_ADRALN;
@@ -530,3 +598,10 @@ asmlinkage int __exception do_debug_exception(unsigned long addr,
 
 	return 0;
 }
+
+#ifdef CONFIG_ARM64_PAN
+void cpu_enable_pan(void *__unused)
+{
+	config_sctlr_el1(SCTLR_EL1_SPAN, 0);
+}
+#endif /* CONFIG_ARM64_PAN */

@@ -72,6 +72,9 @@
  * SPARSEMEM_EXTREME with !SPARSEMEM_VMEMMAP).
  */
 enum pageflags {
+#ifdef CONFIG_HISI_KERNELDUMP
+	PG_memdump,		/* added for kernel dump. */
+#endif
 	PG_locked,		/* Page is locked. Don't touch. */
 	PG_error,
 	PG_referenced,
@@ -108,6 +111,9 @@ enum pageflags {
 #endif
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	PG_compound_lock,
+#endif
+#ifdef CONFIG_TASK_PROTECT_LRU
+	PG_protect,
 #endif
 	__NR_PAGEFLAGS,
 
@@ -223,7 +229,9 @@ PAGEFLAG(Foreign, foreign);				/* Xen */
 PAGEFLAG(Reserved, reserved) __CLEARPAGEFLAG(Reserved, reserved)
 PAGEFLAG(SwapBacked, swapbacked) __CLEARPAGEFLAG(SwapBacked, swapbacked)
 	__SETPAGEFLAG(SwapBacked, swapbacked)
-
+#ifdef CONFIG_HISI_KERNELDUMP
+PAGEFLAG(MemDump, memdump);   /*added for kernel dump*/
+#endif
 __PAGEFLAG(SlobFree, slob_free)
 
 /*
@@ -287,6 +295,10 @@ TESTSCFLAG(HWPoison, hwpoison)
 #else
 PAGEFLAG_FALSE(HWPoison)
 #define __PG_HWPOISON 0
+#endif
+
+#ifdef CONFIG_TASK_PROTECT_LRU
+PAGEFLAG(Protect, protect)
 #endif
 
 /*
@@ -631,15 +643,19 @@ static inline void ClearPageSlabPfmemalloc(struct page *page)
 	 1 << PG_private | 1 << PG_private_2 | \
 	 1 << PG_writeback | 1 << PG_reserved | \
 	 1 << PG_slab	 | 1 << PG_swapcache | 1 << PG_active | \
-	 1 << PG_unevictable | __PG_MLOCKED | __PG_HWPOISON | \
+	 1 << PG_unevictable | __PG_MLOCKED | \
 	 __PG_COMPOUND_LOCK)
 
 /*
  * Flags checked when a page is prepped for return by the page allocator.
- * Pages being prepped should not have any flags set.  It they are set,
+ * Pages being prepped should not have these flags set.  It they are set,
  * there has been a kernel bug or struct page corruption.
+ *
+ * __PG_HWPOISON is exceptional because it needs to be kept beyond page's
+ * alloc-free cycle to prevent from reusing the page.
  */
-#define PAGE_FLAGS_CHECK_AT_PREP	((1 << NR_PAGEFLAGS) - 1)
+#define PAGE_FLAGS_CHECK_AT_PREP	\
+	(((1 << NR_PAGEFLAGS) - 1) & ~__PG_HWPOISON)
 
 #define PAGE_FLAGS_PRIVATE				\
 	(1 << PG_private | 1 << PG_private_2)

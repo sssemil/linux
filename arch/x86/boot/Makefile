@@ -15,6 +15,7 @@
 # The number is the same as you would ordinarily press at bootup.
 
 KASAN_SANITIZE := n
+KCOV_INSTRUMENT := n
 
 SVGA_MODE	:= -DSVGA_MODE=NORMAL_VGA
 

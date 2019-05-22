@@ -100,7 +100,7 @@ static LIST_HEAD(free_entries);
 static DEFINE_SPINLOCK(free_entries_lock);
 
 /* Global disable flag - will be set in case of an error */
-static u32 global_disable __read_mostly;
+static bool global_disable __read_mostly;
 
 /* Early initialization disable flag, set at the end of dma_debug_init */
 static bool dma_debug_initialized __read_mostly;
@@ -573,6 +573,9 @@ void debug_dma_assert_idle(struct page *page)
 	unsigned int nents, i;
 	unsigned long flags;
 	phys_addr_t cln;
+
+	if (dma_debug_disabled())
+		return;
 
 	if (!page)
 		return;
@@ -1178,7 +1181,7 @@ static inline bool overlap(void *addr, unsigned long len, void *start, void *end
 
 static void check_for_illegal_area(struct device *dev, void *addr, unsigned long len)
 {
-	if (overlap(addr, len, _text, _etext) ||
+	if (overlap(addr, len, _stext, _etext) ||
 	    overlap(addr, len, __start_rodata, __end_rodata))
 		err_printk(dev, NULL, "DMA-API: device driver maps memory from kernel text or rodata [addr=%p] [len=%lu]\n", addr, len);
 }

@@ -368,6 +368,21 @@ config DMA_JZ4780
 	  If you have a board based on such a SoC and wish to use DMA for
 	  devices which can use the DMA controller, say Y or M here.
 
+config HISI_DMA
+	tristate "Hisilicon Kirin DMA support"
+	depends on ARCH_HISI
+	select DMA_ENGINE
+	select DMA_VIRTUAL_CHANNELS
+	help
+	  Support the DMA engine for Hisilicon Kirin platform
+	  devices.
+
+config HISI_DMA_NO_CCI
+	bool "Hisilicon Kirin DMA CCI support"
+	depends on (HISI_DMA)
+	help
+	  Hisilicon Kirin DMA CCI switch
+
 config K3_DMA
 	tristate "Hisilicon K3 DMA support"
 	depends on ARCH_HI3xxx
@@ -376,6 +391,12 @@ config K3_DMA
 	help
 	  Support the DMA engine for Hisilicon K3 platform
 	  devices.
+
+config HISI_DMA_PM_RUNTIME
+	bool "Hisilicon hisi DMA pm runtime support"
+	depends on (HISI_DMA && PM_RUNTIME)
+	help
+	  Hisilicon hisi DMA pm runtime switch.
 
 config MOXART_DMA
 	tristate "MOXART DMA support"

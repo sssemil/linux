@@ -26,6 +26,14 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/fence.h>
 
+/*lint -e732 -e774 -e785 -e845 -e715 -e818 -e705 -e717 -e734 -e835 -e713 -e838 -e826 -e737 -e701 -e801
+-e754 -e751 -e749 -e747 -e730 -e64 -e752 -e834 -e736 -e702 -e530 -e550 -e514 -e613 -epn64
+-esym(732,*) -esym(774,*) -esym(785,*) -esym(845,*) -esym(715,*) -esym(818,*) -esym(705,*) -esym(717,*) -esym(734,*)
+-esym(835,*) -esym(713,*) -esym(838,*) -esym(826,*) -esym(737,*) -esym(701,*)
+-esym(801,*) -esym(754,*) -esym(751,*) -esym(749,*) -esym(747,*) -esym(730,*) -esym(64,*) -esym(752,*)
+-esym(1744,*) -esym(1762,*) -esym(834,*) -esym(736,*) -esym(702,*) -esym(530,*) -esym(550,*) -esym(514,*)
+-esym(613,*)*/
+
 EXPORT_TRACEPOINT_SYMBOL(fence_annotate_wait_on);
 EXPORT_TRACEPOINT_SYMBOL(fence_emit);
 
@@ -304,8 +312,12 @@ fence_remove_callback(struct fence *fence, struct fence_cb *cb)
 	spin_lock_irqsave(fence->lock, flags);
 
 	ret = !list_empty(&cb->node);
-	if (ret)
+	if (ret) {
 		list_del_init(&cb->node);
+		if (list_empty(&fence->cb_list))
+			if (fence->ops->disable_signaling)
+				fence->ops->disable_signaling(fence);
+	}
 
 	spin_unlock_irqrestore(fence->lock, flags);
 

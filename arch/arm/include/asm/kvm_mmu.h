@@ -66,6 +66,9 @@ void kvm_mmu_free_memory_caches(struct kvm_vcpu *vcpu);
 phys_addr_t kvm_mmu_get_httbr(void);
 phys_addr_t kvm_mmu_get_boot_httbr(void);
 phys_addr_t kvm_get_idmap_vector(void);
+#ifdef CONFIG_HIBERNATION
+phys_addr_t kvm_get_idmap_start(void);
+#endif
 int kvm_mmu_init(void);
 void kvm_clear_hyp_idmap(void);
 

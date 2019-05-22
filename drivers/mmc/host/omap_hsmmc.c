@@ -755,6 +755,7 @@ omap_hsmmc_show_cover_switch(struct device *dev, struct device_attribute *attr,
 	struct mmc_host *mmc = container_of(dev, struct mmc_host, class_dev);
 	struct omap_hsmmc_host *host = mmc_priv(mmc);
 
+	/*cppcheck-suppress * */
 	return sprintf(buf, "%s\n",
 			omap_hsmmc_cover_is_closed(host) ? "closed" : "open");
 }
@@ -768,6 +769,7 @@ omap_hsmmc_show_slot_name(struct device *dev, struct device_attribute *attr,
 	struct mmc_host *mmc = container_of(dev, struct mmc_host, class_dev);
 	struct omap_hsmmc_host *host = mmc_priv(mmc);
 
+	/*cppcheck-suppress * */
 	return sprintf(buf, "%s\n", mmc_pdata(host)->name);
 }
 
@@ -977,11 +979,13 @@ static void omap_hsmmc_dbg_report_irq(struct omap_hsmmc_host *host, u32 status)
 	char *buf = res;
 	int len, i;
 
+	/*cppcheck-suppress * */
 	len = sprintf(buf, "MMC IRQ 0x%x :", status);
 	buf += len;
 
 	for (i = 0; i < ARRAY_SIZE(omap_hsmmc_status_bits); i++)
 		if (status & (1 << i)) {
+			/*cppcheck-suppress * */
 			len = sprintf(buf, " %s", omap_hsmmc_status_bits[i]);
 			buf += len;
 		}
@@ -1062,6 +1066,10 @@ static void omap_hsmmc_do_irq(struct omap_hsmmc_host *host, int status)
 
 		if (status & (CTO_EN | CCRC_EN))
 			end_cmd = 1;
+		if (host->data || host->response_busy) {
+			end_trans = !end_cmd;
+			host->response_busy = 0;
+		}
 		if (status & (CTO_EN | DTO_EN))
 			hsmmc_command_incomplete(host, -ETIMEDOUT, end_cmd);
 		else if (status & (CCRC_EN | DCRC_EN))
@@ -1080,10 +1088,6 @@ static void omap_hsmmc_do_irq(struct omap_hsmmc_host *host, int status)
 				hsmmc_command_incomplete(host, error, end_cmd);
 			}
 			dev_dbg(mmc_dev(host->mmc), "AC12 err: 0x%x\n", ac12);
-		}
-		if (host->data || host->response_busy) {
-			end_trans = !end_cmd;
-			host->response_busy = 0;
 		}
 	}
 

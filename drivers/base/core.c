@@ -27,6 +27,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/netdevice.h>
 #include <linux/sysfs.h>
+#include <linux/cpuidle.h>
 
 #include "base.h"
 #include "power/power.h"
@@ -448,7 +449,6 @@ static ssize_t online_store(struct device *dev, struct device_attribute *attr,
 	ret = lock_device_hotplug_sysfs();
 	if (ret)
 		return ret;
-
 	ret = val ? device_online(dev) : device_offline(dev);
 	unlock_device_hotplug();
 	return ret < 0 ? ret : count;

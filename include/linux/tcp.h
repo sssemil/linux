@@ -328,6 +328,15 @@ struct tcp_sock {
 	 * socket. Used to retransmit SYNACKs etc.
 	 */
 	struct request_sock *fastopen_rsk;
+
+#ifdef CONFIG_HW_WIFI
+	u32 dack_rcv_nxt; /*client send d-ack with this seq*/
+	u32 dack_seq_num; /*the counts of client send d-ack with this seq continuously*/
+#endif
+#ifdef CONFIG_CHR_NETLINK_MODULE
+	u8 first_data_flag;
+	u8 data_net_flag;
+#endif
 };
 
 enum tsq_flags {
@@ -339,6 +348,9 @@ enum tsq_flags {
 	TCP_MTU_REDUCED_DEFERRED,  /* tcp_v{4|6}_err() could not call
 				    * tcp_v{4|6}_mtu_reduced()
 				    */
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	TCP_CROSSLAYER_RECOVERY_DEFERRED, /* aspen_crosslayer_recovery() found socket was owned */
+#endif
 };
 
 static inline struct tcp_sock *tcp_sk(const struct sock *sk)

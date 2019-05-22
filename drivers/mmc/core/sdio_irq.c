@@ -61,7 +61,7 @@ static int process_sdio_pending_irqs(struct mmc_host *host)
 		 * register with a Marvell SD8797 card. A dummy CMD52 read to
 		 * function 0 register 0xff can avoid this.
 		 */
-		mmc_io_rw_direct(card, 0, 0, 0xff, 0, &dummy);
+		(void)mmc_io_rw_direct(card, 0, 0, 0xff, 0, &dummy);
 	}
 
 	count = 0;
@@ -105,7 +105,7 @@ static int sdio_irq_thread(void *_host)
 	unsigned long period, idle_period;
 	int ret;
 
-	sched_setscheduler(current, SCHED_FIFO, &param);
+	(void)sched_setscheduler(current, SCHED_FIFO, &param);
 
 	/*
 	 * We want to allow for SDIO cards to work even on non SDIO
@@ -148,7 +148,7 @@ static int sdio_irq_thread(void *_host)
 		if (ret < 0) {
 			set_current_state(TASK_INTERRUPTIBLE);
 			if (!kthread_should_stop())
-				schedule_timeout(HZ);
+				(void)schedule_timeout(HZ);
 			set_current_state(TASK_RUNNING);
 		}
 
@@ -174,7 +174,7 @@ static int sdio_irq_thread(void *_host)
 			mmc_host_clk_release(host);
 		}
 		if (!kthread_should_stop())
-			schedule_timeout(period);
+			(void)schedule_timeout(period);
 		set_current_state(TASK_RUNNING);
 	} while (!kthread_should_stop());
 
@@ -247,7 +247,7 @@ static void sdio_single_irq_set(struct mmc_card *card)
 	card->sdio_single_irq = NULL;
 	if ((card->host->caps & MMC_CAP_SDIO_IRQ) &&
 	    card->host->sdio_irqs == 1)
-		for (i = 0; i < card->sdio_funcs; i++) {
+		for (i = 0; i < card->sdio_funcs; i++) {/*lint !e574*/
 		       func = card->sdio_func[i];
 		       if (func && func->irq_handler) {
 			       card->sdio_single_irq = func;
@@ -329,7 +329,7 @@ int sdio_release_irq(struct sdio_func *func)
 	if (ret)
 		return ret;
 
-	reg &= ~(1 << func->num);
+	reg &= ~(1 << func->num);/*lint !e502*/
 
 	/* Disable master interrupt with the last function interrupt */
 	if (!(reg & 0xFE))

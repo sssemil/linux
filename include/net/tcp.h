@@ -44,6 +44,10 @@
 #include <net/inet_ecn.h>
 #include <net/dst.h>
 
+#ifdef CONFIG_HUAWEI_BASTET
+#include <huawei_platform/power/bastet/bastet.h>
+#endif
+
 #include <linux/seq_file.h>
 #include <linux/memcontrol.h>
 
@@ -281,6 +285,7 @@ extern unsigned int sysctl_tcp_notsent_lowat;
 extern int sysctl_tcp_min_tso_segs;
 extern int sysctl_tcp_autocorking;
 extern int sysctl_tcp_invalid_ratelimit;
+extern int sysctl_tcp_default_init_rwnd;
 
 extern atomic_long_t tcp_memory_allocated;
 extern struct percpu_counter tcp_sockets_allocated;
@@ -346,6 +351,14 @@ extern struct proto tcp_prot;
 #define TCP_DEC_STATS(net, field)	SNMP_DEC_STATS((net)->mib.tcp_statistics, field)
 #define TCP_ADD_STATS_USER(net, field, val) SNMP_ADD_STATS_USER((net)->mib.tcp_statistics, field, val)
 #define TCP_ADD_STATS(net, field, val)	SNMP_ADD_STATS((net)->mib.tcp_statistics, field, val)
+
+#ifdef CONFIG_HW_WIFIPRO
+#define WIFIPRO_TCP_INC_STATS(net, field)	SNMP_INC_STATS((net)->mib.wifipro_tcp_statistics, field)
+#define WIFIPRO_TCP_INC_STATS_BH(net, field)	SNMP_INC_STATS_BH((net)->mib.wifipro_tcp_statistics, field)
+#define WIFIPRO_TCP_DEC_STATS(net, field)	SNMP_DEC_STATS((net)->mib.wifipro_tcp_statistics, field)
+#define WIFIPRO_TCP_ADD_STATS_USER(net, field, val) SNMP_ADD_STATS_USER((net)->mib.wifipro_tcp_statistics, field, val)
+#define WIFIPRO_TCP_ADD_STATS(net, field, val)	SNMP_ADD_STATS((net)->mib.wifipro_tcp_statistics, field, val)
+#endif
 
 void tcp_tasklet_init(void);
 
@@ -882,6 +895,10 @@ static inline void tcp_set_ca_state(struct sock *sk, const u8 ca_state)
 	if (icsk->icsk_ca_ops->set_state)
 		icsk->icsk_ca_ops->set_state(sk, ca_state);
 	icsk->icsk_ca_state = ca_state;
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	if (ca_state == TCP_CA_Open)
+		sk->undo_modem_drop_marker = 0;
+#endif
 }
 
 static inline void tcp_ca_event(struct sock *sk, const enum tcp_ca_event event)
@@ -1048,6 +1065,11 @@ static inline void tcp_check_probe_timer(struct sock *sk)
 	const struct tcp_sock *tp = tcp_sk(sk);
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
+#ifdef CONFIG_HUAWEI_BASTET
+	if (bastet_sock_send_prepare(sk))
+		return;
+#endif
+
 	if (!tp->packets_out && !icsk->icsk_pending)
 		inet_csk_reset_xmit_timer(sk, ICSK_TIME_PROBE0,
 					  icsk->icsk_rto, TCP_RTO_MAX);
@@ -1095,6 +1117,8 @@ static inline void tcp_prequeue_init(struct tcp_sock *tp)
 
 bool tcp_prequeue(struct sock *sk, struct sk_buff *skb);
 
+int tcp_filter(struct sock *sk, struct sk_buff *skb);
+
 #undef STATE_TRACE
 
 #ifdef STATE_TRACE
@@ -1107,6 +1131,8 @@ static const char *statename[]={
 void tcp_set_state(struct sock *sk, int state);
 
 void tcp_done(struct sock *sk);
+
+int tcp_abort(struct sock *sk, int err);
 
 static inline void tcp_sack_reset(struct tcp_options_received *rx_opt)
 {
@@ -1434,6 +1460,8 @@ static inline void tcp_check_send_head(struct sock *sk, struct sk_buff *skb_unli
 {
 	if (sk->sk_send_head == skb_unlinked)
 		sk->sk_send_head = NULL;
+	if (tcp_sk(sk)->highest_sack == skb_unlinked)
+		tcp_sk(sk)->highest_sack = NULL;
 }
 
 static inline void tcp_init_send_head(struct sock *sk)

@@ -56,7 +56,7 @@
 #include <linux/random.h>
 #include <linux/ftrace_event.h>
 #include <linux/suspend.h>
-
+#include <linux/hisi/mntn_record_sp.h>
 #include "tree.h"
 #include "rcu.h"
 
@@ -170,6 +170,21 @@ module_param(gp_init_delay, int, 0644);
 static const int gp_init_delay;
 #endif /* #else #ifdef CONFIG_RCU_TORTURE_TEST_SLOW_INIT */
 #define PER_RCU_NODE_PERIOD 10	/* Number of grace periods between delays. */
+
+#ifdef CONFIG_HISI_ENABLE_HPM_DATA_COLLECT
+extern void (*arm_pm_restart)(char str, const char *cmd);
+#define  MAX_RCU_NR     2
+
+static void rcu_reboot(void)
+{
+	static int rcu_nr = 0;
+
+	rcu_nr++;
+
+	if (rcu_nr > MAX_RCU_NR && arm_pm_restart)
+		BUG_ON(1);
+}
+#endif
 
 /*
  * Track the rcutorture test sequence number and the update version
@@ -1152,8 +1167,10 @@ static void rcu_dump_cpu_stacks(struct rcu_state *rsp)
 		raw_spin_lock_irqsave(&rnp->lock, flags);
 		if (rnp->qsmask != 0) {
 			for (cpu = 0; cpu <= rnp->grphi - rnp->grplo; cpu++)
-				if (rnp->qsmask & (1UL << cpu))
+				if (rnp->qsmask & (1UL << cpu)){
 					dump_cpu_task(rnp->grplo + cpu);
+					mntn_show_stack_othercpus(rnp->grplo + cpu);
+				}
 		}
 		raw_spin_unlock_irqrestore(&rnp->lock, flags);
 	}
@@ -1234,6 +1251,7 @@ static void print_other_cpu_stall(struct rcu_state *rsp, unsigned long gpnum)
 
 	force_quiescent_state(rsp);  /* Kick them all. */
 }
+
 
 static void print_cpu_stall(struct rcu_state *rsp)
 {
@@ -1321,15 +1339,19 @@ static void check_cpu_stall(struct rcu_state *rsp, struct rcu_data *rdp)
 	rnp = rdp->mynode;
 	if (rcu_gp_in_progress(rsp) &&
 	    (ACCESS_ONCE(rnp->qsmask) & rdp->grpmask)) {
-
+#ifdef CONFIG_HISI_ENABLE_HPM_DATA_COLLECT
+		 rcu_reboot();
+#endif
 		/* We haven't checked in, so go dump stack. */
 		print_cpu_stall(rsp);
-
 	} else if (rcu_gp_in_progress(rsp) &&
 		   ULONG_CMP_GE(j, js + RCU_STALL_RAT_DELAY)) {
 
 		/* They had a few time units to dump stack, so complain. */
 		print_other_cpu_stall(rsp, gpnum);
+#ifdef CONFIG_HISI_ENABLE_HPM_DATA_COLLECT
+		 rcu_reboot();
+#endif
 	}
 }
 

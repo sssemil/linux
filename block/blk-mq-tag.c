@@ -75,6 +75,8 @@ void blk_mq_tag_wakeup_all(struct blk_mq_tags *tags, bool include_reserve)
 	struct blk_mq_bitmap_tags *bt;
 	int i, wake_index;
 
+	smp_mb();
+
 	bt = &tags->bitmap_tags;
 	wake_index = atomic_read(&bt->wake_index);
 	for (i = 0; i < BT_WAIT_QUEUES; i++) {
@@ -517,14 +519,17 @@ static int bt_alloc(struct blk_mq_bitmap_tags *bt, unsigned int depth,
 		nr = ALIGN(depth, tags_per_word) / tags_per_word;
 		bt->map = kzalloc_node(nr * sizeof(struct blk_align_bitmap),
 						GFP_KERNEL, node);
-		if (!bt->map)
+		if (!bt->map) {
+			pr_err("%s: alloc bt maps failed\n", __func__);
 			return -ENOMEM;
+		}
 
 		bt->map_nr = nr;
 	}
 
 	bt->bs = kzalloc(BT_WAIT_QUEUES * sizeof(*bt->bs), GFP_KERNEL);
 	if (!bt->bs) {
+		pr_err("%s: alloc bt bs failed\n", __func__);
 		kfree(bt->map);
 		bt->map = NULL;
 		return -ENOMEM;
@@ -560,6 +565,7 @@ static struct blk_mq_tags *blk_mq_init_bitmap_tags(struct blk_mq_tags *tags,
 
 	return tags;
 enomem:
+	pr_err("%s: error nomem\n", __func__);
 	bt_free(&tags->bitmap_tags);
 	kfree(tags);
 	return NULL;
@@ -577,8 +583,10 @@ struct blk_mq_tags *blk_mq_init_tags(unsigned int total_tags,
 	}
 
 	tags = kzalloc_node(sizeof(*tags), GFP_KERNEL, node);
-	if (!tags)
+	if (!tags) {
+		pr_err("blk-mq: alloc tags failed\n");
 		return NULL;
+	}
 
 	tags->nr_tags = total_tags;
 	tags->nr_reserved_tags = reserved_tags;
@@ -603,8 +611,10 @@ void blk_mq_tag_init_last_tag(struct blk_mq_tags *tags, unsigned int *tag)
 int blk_mq_tag_update_depth(struct blk_mq_tags *tags, unsigned int tdepth)
 {
 	tdepth -= tags->nr_reserved_tags;
-	if (tdepth > tags->nr_tags)
+	if (tdepth > tags->nr_tags) {
+		pr_err("%s: target depth too large\n", __func__);
 		return -EINVAL;
+	}
 
 	/*
 	 * Don't need (or can't) update reserved tags here, they remain

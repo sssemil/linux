@@ -149,7 +149,7 @@ extern struct task_group root_task_group;
 
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 # define INIT_VTIME(tsk)						\
-	.vtime_seqlock = __SEQLOCK_UNLOCKED(tsk.vtime_seqlock),	\
+	.vtime_seqcount = SEQCNT_ZERO(tsk.vtime_seqcount),	\
 	.vtime_snap = 0,				\
 	.vtime_snap_whence = VTIME_SYS,
 #else
@@ -158,6 +158,15 @@ extern struct task_group root_task_group;
 
 #define INIT_TASK_COMM "swapper"
 
+#ifdef CONFIG_HUAWEI_MSG_POLICY
+#define INIT_MSG_POLICY(tsk)	\
+	.ms = {						\
+		.main_looper_thread = false,\
+		.sched_time = {0},		\
+	},
+#else
+#define INIT_MSG_POLICY(tsk)
+#endif
 #ifdef CONFIG_RT_MUTEXES
 # define INIT_RT_MUTEXES(tsk)						\
 	.pi_waiters = RB_ROOT,						\
@@ -213,6 +222,7 @@ extern struct task_group root_task_group;
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
 	INIT_PUSHABLE_TASKS(tsk)					\
 	INIT_CGROUP_SCHED(tsk)						\
+	INIT_MSG_POLICY(tsk)						\
 	.ptraced	= LIST_HEAD_INIT(tsk.ptraced),			\
 	.ptrace_entry	= LIST_HEAD_INIT(tsk.ptrace_entry),		\
 	.real_parent	= &tsk,						\

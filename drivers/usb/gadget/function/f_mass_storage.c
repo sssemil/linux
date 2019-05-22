@@ -218,10 +218,13 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/composite.h>
+#include <asm/uaccess.h>
 
 #include "gadget_chips.h"
 #include "configfs.h"
 
+#include <chipset_common/hwusb/hw_usb_rwswitch.h>
+#define SC_REWIND_11 0x11
 
 /*------------------------------------------------------------------------*/
 
@@ -499,7 +502,12 @@ static int fsg_setup(struct usb_function *f,
 	u16			w_value = le16_to_cpu(ctrl->wValue);
 	u16			w_length = le16_to_cpu(ctrl->wLength);
 
+	/* modify to adapt for Android */
+#ifdef CONFIG_HISI_USB_CONFIGFS
+	if (!fsg->common->fsg)
+#else
 	if (!fsg_is_set(fsg->common))
+#endif
 		return -EOPNOTSUPP;
 
 	++fsg->common->ep0_req_tag;	/* Record arrival of a new request */
@@ -1196,6 +1204,9 @@ static int do_read_header(struct fsg_common *common, struct fsg_buffhd *bh)
 	return 8;
 }
 
+#include "function-hisi/f_mass_storage_hisi.c"
+
+#ifndef CONFIG_USB_MASS_STORAGE_SUPPORT_MAC
 static int do_read_toc(struct fsg_common *common, struct fsg_buffhd *bh)
 {
 	struct fsg_lun	*curlun = common->curlun;
@@ -1222,6 +1233,7 @@ static int do_read_toc(struct fsg_common *common, struct fsg_buffhd *bh)
 	store_cdrom_address(&buf[16], msf, curlun->num_sectors);
 	return 20;
 }
+#endif
 
 static int do_mode_sense(struct fsg_common *common, struct fsg_buffhd *bh)
 {
@@ -1804,6 +1816,14 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 	return 0;
 }
 
+int get_suitestate(void);
+static int do_get_suitestate(struct fsg_common *common, struct fsg_buffhd *bh)
+{
+	u8 *buf = (u8* )bh->buf;
+	buf[0] = get_suitestate();
+	return 1;
+}
+
 /* wrapper of check_command for data size in blocks handling */
 static int check_command_size_in_blocks(struct fsg_common *common,
 		int cmnd_size, enum data_direction data_dir,
@@ -1847,7 +1867,11 @@ static int do_scsi_command(struct fsg_common *common)
 		if (reply == 0)
 			reply = do_inquiry(common, bh);
 		break;
-
+	case SEEK_6:
+		common->data_size_from_cmnd = 1;
+		if (common->cmnd[1] == 0x01 && common->curlun->cdrom == 1)
+			reply = do_get_suitestate(common, bh);
+		break;
 	case MODE_SELECT:
 		common->data_size_from_cmnd = common->cmnd[4];
 		reply = check_command(common, 6, DATA_DIR_FROM_HOST,
@@ -1954,9 +1978,15 @@ static int do_scsi_command(struct fsg_common *common)
 			goto unknown_cmnd;
 		common->data_size_from_cmnd =
 			get_unaligned_be16(&common->cmnd[7]);
+#ifdef CONFIG_USB_MASS_STORAGE_SUPPORT_MAC
+		reply = check_command(common, 10, DATA_DIR_TO_HOST,
+				      (3<<1) | (7<<7), 1,
+				      "READ TOC");
+#else
 		reply = check_command(common, 10, DATA_DIR_TO_HOST,
 				      (7<<6) | (1<<1), 1,
 				      "READ TOC");
+#endif
 		if (reply == 0)
 			reply = do_read_toc(common, bh);
 		break;
@@ -2049,6 +2079,23 @@ static int do_scsi_command(struct fsg_common *common)
 				      "WRITE(12)");
 		if (reply == 0)
 			reply = do_write(common);
+		break;
+	case SC_REWIND_11:
+		/* when rework in manufacture, if the phone is in google ports mode,
+		 * we need to switch it to multi-ports mode for using the diag.  */
+		{
+			u8 cmnd[MAX_COMMAND_SIZE];
+			memset(cmnd,0,sizeof(cmnd));
+			cmnd[0] = SC_REWIND_11;
+			cmnd[1] = 0x06;
+			if (0 == memcmp(common->cmnd, cmnd, sizeof(cmnd))) {
+				hw_usb_port_switch_request(INDEX_ENDUSER_SWITCH);//enduser pnp switch such as pc modem
+			}
+			cmnd[9] = 0x11;
+			if (0 == memcmp(common->cmnd, cmnd, sizeof(cmnd))) {
+				hw_usb_port_switch_request(INDEX_FACTORY_REWORK);//manufactory rework
+			}
+		}
 		break;
 
 	/*
@@ -2489,6 +2536,7 @@ static void handle_exception(struct fsg_common *common)
 static int fsg_main_thread(void *common_)
 {
 	struct fsg_common	*common = common_;
+	mm_segment_t oldfs;
 
 	/*
 	 * Allow the thread to be killed by a signal, but set the signal mask
@@ -2507,6 +2555,7 @@ static int fsg_main_thread(void *common_)
 	 * pointers.  That way we can pass a kernel pointer to a routine
 	 * that expects a __user pointer and it will work okay.
 	 */
+	oldfs = get_fs();
 	set_fs(get_ds());
 
 	/* The main loop */
@@ -2569,6 +2618,8 @@ static int fsg_main_thread(void *common_)
 
 	/* Let fsg_unbind() know the thread has exited */
 	complete_and_exit(&common->thread_notifier, 0);
+
+	set_fs(oldfs);
 }
 
 
@@ -2628,6 +2679,9 @@ static DEVICE_ATTR_RW(nofua);
 /* mode wil be set in fsg_lun_attr_is_visible() */
 static DEVICE_ATTR(ro, 0, ro_show, ro_store);
 static DEVICE_ATTR(file, 0, file_show, file_store);
+
+#include "function-hisi/hw_msconfig.c"
+#include "function-hisi/hw_hisuite.c"
 
 /****************************** FSG COMMON ******************************/
 
@@ -2742,9 +2796,9 @@ error_release:
 }
 EXPORT_SYMBOL_GPL(fsg_common_set_num_buffers);
 
-void fsg_common_remove_lun(struct fsg_lun *lun, bool sysfs)
+void fsg_common_remove_lun(struct fsg_lun *lun)
 {
-	if (sysfs)
+	if (device_is_registered(&lun->dev))
 		device_unregister(&lun->dev);
 	fsg_lun_close(lun);
 	kfree(lun);
@@ -2757,7 +2811,7 @@ static void _fsg_common_remove_luns(struct fsg_common *common, int n)
 
 	for (i = 0; i < n; ++i)
 		if (common->luns[i]) {
-			fsg_common_remove_lun(common->luns[i], common->sysfs);
+			fsg_common_remove_lun(common->luns[i]);
 			common->luns[i] = NULL;
 		}
 }
@@ -2786,7 +2840,7 @@ int fsg_common_set_nluns(struct fsg_common *common, int nluns)
 		return -EINVAL;
 	}
 
-	curlun = kcalloc(nluns, sizeof(*curlun), GFP_KERNEL);
+	curlun = kcalloc(FSG_MAX_LUNS, sizeof(*curlun), GFP_KERNEL);
 	if (unlikely(!curlun))
 		return -ENOMEM;
 
@@ -2848,6 +2902,9 @@ static struct attribute *fsg_lun_dev_attrs[] = {
 	&dev_attr_ro.attr,
 	&dev_attr_file.attr,
 	&dev_attr_nofua.attr,
+	&dev_attr_autorun.attr,
+	&dev_attr_luns.attr,
+	&dev_attr_suitestate.attr,
 	NULL
 };
 
@@ -2858,9 +2915,9 @@ static umode_t fsg_lun_dev_is_visible(struct kobject *kobj,
 	struct fsg_lun *lun = fsg_lun_from_dev(dev);
 
 	if (attr == &dev_attr_ro.attr)
-		return lun->cdrom ? S_IRUGO : (S_IWUSR | S_IRUGO);
+		return lun->cdrom ? S_IRUGO : (S_IWUSR | S_IRUGO); /* [false alarm]:this is original code */
 	if (attr == &dev_attr_file.attr)
-		return lun->removable ? (S_IWUSR | S_IRUGO) : S_IRUGO;
+		return lun->removable ? (S_IWUSR | S_IRUGO) : S_IRUGO; /* [false alarm]:this is original code */
 	return attr->mode;
 }
 
@@ -2951,7 +3008,7 @@ int fsg_common_create_lun(struct fsg_common *common, struct fsg_lun_config *cfg,
 	return 0;
 
 error_lun:
-	if (common->sysfs)
+	if (device_is_registered(&lun->dev))
 		device_unregister(&lun->dev);
 	fsg_lun_close(lun);
 	common->luns[id] = NULL;
@@ -3004,11 +3061,15 @@ int fsg_common_run_thread(struct fsg_common *common)
 {
 	common->state = FSG_STATE_IDLE;
 	/* Tell the thread to start working */
-	common->thread_task =
-		kthread_create(fsg_main_thread, common, "file-storage");
-	if (IS_ERR(common->thread_task)) {
-		common->state = FSG_STATE_TERMINATED;
-		return PTR_ERR(common->thread_task);
+	if (!common->thread_task) {
+		/* "file-storage" thread should be created
+		 * only when thread_task is null */
+		common->thread_task =
+			kthread_create(fsg_main_thread, common, "file-storage");
+		if (IS_ERR(common->thread_task)) {
+			common->state = FSG_STATE_TERMINATED;
+			return PTR_ERR(common->thread_task);
+		}
 	}
 
 	DBG(common, "I/O thread pid: %d\n", task_pid_nr(common->thread_task));
@@ -3039,7 +3100,7 @@ static void fsg_common_release(struct kref *ref)
 			if (!lun)
 				continue;
 			fsg_lun_close(lun);
-			if (common->sysfs)
+		if (device_is_registered(&lun->dev))
 				device_unregister(&lun->dev);
 			kfree(lun);
 		}
@@ -3120,7 +3181,8 @@ static int fsg_bind(struct usb_configuration *c, struct usb_function *f)
 			fsg_ss_function);
 	if (ret)
 		goto autoconf_fail;
-
+	pr_info("mass_storage IN/%s OUT/%s\n", fsg->bulk_in->name,
+			fsg->bulk_out->name);
 	return 0;
 
 autoconf_fail:
@@ -3357,7 +3419,7 @@ static void fsg_lun_drop(struct config_group *group, struct config_item *item)
 		unregister_gadget_item(gadget);
 	}
 
-	fsg_common_remove_lun(lun_opts->lun, fsg_opts->common->sysfs);
+	fsg_common_remove_lun(lun_opts->lun);
 	fsg_opts->common->luns[lun_opts->lun_id] = NULL;
 	lun_opts->lun_id = 0;
 	mutex_unlock(&fsg_opts->lock);
@@ -3526,6 +3588,17 @@ static struct usb_function_instance *fsg_alloc_inst(void)
 	config.removable = true;
 	rc = fsg_common_create_lun(opts->common, &config, 0, "lun.0",
 			(const char **)&opts->func_inst.group.cg_item.ci_name);
+
+	if (rc)
+		goto release_buffers;
+
+#ifdef CONFIG_HISI_USB_CONFIGFS
+	if (create_mass_storage_device(&opts->func_inst)) {
+		rc = -ENODEV;
+		goto remove_luns;
+	}
+#endif
+
 	opts->lun0.lun = opts->common->luns[0];
 	opts->lun0.lun_id = 0;
 	config_group_init_type_name(&opts->lun0.group, "lun.0", &fsg_lun_type);
@@ -3536,6 +3609,13 @@ static struct usb_function_instance *fsg_alloc_inst(void)
 
 	return &opts->func_inst;
 
+#ifdef CONFIG_HISI_USB_CONFIGFS
+remove_luns:
+	fsg_common_remove_luns(opts->common);
+#endif
+
+release_buffers:
+	fsg_common_free_buffers(opts->common);
 release_luns:
 	kfree(opts->common->luns);
 release_opts:
@@ -3563,14 +3643,26 @@ static struct usb_function *fsg_alloc(struct usb_function_instance *fi)
 	struct fsg_opts *opts = fsg_opts_from_func_inst(fi);
 	struct fsg_common *common = opts->common;
 	struct fsg_dev *fsg;
+	unsigned nluns, i;
 
 	fsg = kzalloc(sizeof(*fsg), GFP_KERNEL);
 	if (unlikely(!fsg))
 		return ERR_PTR(-ENOMEM);
 
 	mutex_lock(&opts->lock);
+	if (!opts->refcnt) {
+		for (nluns = i = 0; i < FSG_MAX_LUNS; ++i)
+			if (common->luns[i])
+				nluns = i + 1;
+		if (!nluns)
+			pr_warn("No LUNS defined, continuing anyway\n");
+		else
+			common->nluns = nluns;
+		pr_info("Number of LUNs=%u\n", common->nluns);
+	}
 	opts->refcnt++;
 	mutex_unlock(&opts->lock);
+
 	fsg->function.name	= FSG_DRIVER_DESC;
 	fsg->function.bind	= fsg_bind;
 	fsg->function.unbind	= fsg_unbind;

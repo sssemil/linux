@@ -52,9 +52,11 @@ static ssize_t brightness_store(struct device *dev,
 	ret = kstrtoul(buf, 10, &state);
 	if (ret)
 		goto unlock;
-
+    /*need to keep delay_on and delay_off dev node when led is off*/
+#ifndef CONFIG_HISI_LEDS_NODE_PERSIST
 	if (state == LED_OFF)
 		led_trigger_remove(led_cdev);
+#endif
 	led_set_brightness(led_cdev, state);
 
 	ret = size;
@@ -179,7 +181,9 @@ EXPORT_SYMBOL_GPL(led_classdev_suspend);
 void led_classdev_resume(struct led_classdev *led_cdev)
 {
 	led_cdev->brightness_set(led_cdev, led_cdev->brightness);
-
+#ifdef CONFIG_HISI_LEDS_HWTIMER /*use hardware timer*/
+	led_cdev->blink_set(led_cdev, &led_cdev->blink_delay_on, &led_cdev->blink_delay_off);
+#endif
 	if (led_cdev->flash_resume)
 		led_cdev->flash_resume(led_cdev);
 
@@ -187,6 +191,7 @@ void led_classdev_resume(struct led_classdev *led_cdev)
 }
 EXPORT_SYMBOL_GPL(led_classdev_resume);
 
+#ifdef CONFIG_PM_SLEEP
 static int led_suspend(struct device *dev)
 {
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
@@ -206,11 +211,9 @@ static int led_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
-static const struct dev_pm_ops leds_class_dev_pm_ops = {
-	.suspend        = led_suspend,
-	.resume         = led_resume,
-};
+static SIMPLE_DEV_PM_OPS(leds_class_dev_pm_ops, led_suspend, led_resume);
 
 static int match_name(struct device *dev, const void *data)
 {
@@ -224,12 +227,15 @@ static int led_classdev_next_name(const char *init_name, char *name,
 {
 	unsigned int i = 0;
 	int ret = 0;
+	struct device *dev;
 
 	strlcpy(name, init_name, len);
 
-	while (class_find_device(leds_class, NULL, name, match_name) &&
-	       (ret < len))
+	while ((ret < len) &&
+	       (dev = class_find_device(leds_class, NULL, name, match_name))) {
+		put_device(dev);
 		ret = snprintf(name, len, "%s_%u", init_name, ++i);
+	}
 
 	if (ret >= len)
 		return -ENOMEM;

@@ -331,7 +331,11 @@ struct scsi_host_template {
 #define SCSI_ADAPTER_RESET	1
 #define SCSI_FIRMWARE_RESET	2
 
-
+#ifdef CONFIG_SCSI_HISI_MQ
+	int (*direct_flush)(struct scsi_device *, int);
+	void (*statistics_report)(struct Scsi_Host *,struct blkdev_statistics_info* );
+	int (*wait_io_schedule)(struct Scsi_Host *,struct blk_dispatch_decision_para *,int (*)(struct blk_dispatch_decision_para *));
+#endif
 	/*
 	 * Name of proc directory
 	 */
@@ -539,6 +543,19 @@ enum scsi_host_state {
 	SHOST_DEL_RECOVERY,
 };
 
+#ifdef CONFIG_SCSI_HISI_MQ
+enum scsi_host_mq_quirk{
+	SHOST_MQ_QUIRK_FORCE_SAME_CPU = 0,
+	SHOST_MQ_QUIRK_FORCE_DISPATCH_CTX,
+	SHOST_MQ_QUIRK_FORCE_SOFT_IRQ,
+	SHOST_MQ_QUIRK_FLUSH_REDUCING,
+	SHOST_MQ_QUIRK_DISPATCH_DICISION,
+};
+
+#define SHOST_MQ_QUIRK(x)	(1 << x)
+#endif
+
+#define HISI_SCSI_HOST_BUSY_IDLE_EN		(1 << 1)
 struct Scsi_Host {
 	/*
 	 * __devices is protected by the host_lock, but you should
@@ -635,7 +652,12 @@ struct Scsi_Host {
 	 * is nr_hw_queues * can_queue.
 	 */
 	unsigned nr_hw_queues;
-	/* 
+#ifdef CONFIG_SCSI_HISI_MQ
+	int mq_queue_depth;
+	unsigned long mq_quirk_flag;
+#endif
+	unsigned long hisi_scsi_host_flag;
+	/*
 	 * Used to assign serial numbers to the cmds.
 	 * Protected by the host lock.
 	 */
@@ -669,6 +691,18 @@ struct Scsi_Host {
 
 	/* The controller does not support WRITE SAME */
 	unsigned no_write_same:1;
+
+        /*
+         * Set "SELECT REPORT" field to allow detection of well known logical
+         * units along with standard LUs.
+         */
+        unsigned report_wlus:1;
+
+        /*
+         * Set "DBD" field in mode_sense caching mode page in case it is
+         * mandatory by LLD standard.
+         */
+        unsigned set_dbd_for_caching:1;
 
 	unsigned use_blk_mq:1;
 	unsigned use_cmd_list:1;
@@ -735,6 +769,10 @@ struct Scsi_Host {
 	 * Needed just in case we have virtual hosts.
 	 */
 	struct device *dma_dev;
+
+#ifdef CONFIG_SCSI_UFS_INLINE_CRYPTO
+	int crypto_enabled;
+#endif
 
 	/*
 	 * We should ensure that this is aligned, both for better performance

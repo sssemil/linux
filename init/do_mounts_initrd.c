@@ -37,6 +37,7 @@ static int init_linuxrc(struct subprocess_info *info, struct cred *new)
 {
 	sys_unshare(CLONE_FS | CLONE_FILES);
 	/* stdin/stdout/stderr for /linuxrc */
+	/*cppcheck-suppress * */
 	sys_open("/dev/console", O_RDWR, 0);
 	sys_dup(0);
 	sys_dup(0);
@@ -112,7 +113,7 @@ static void __init handle_initrd(void)
 			error = sys_ioctl(fd, BLKFLSBUF, 0);
 			sys_close(fd);
 		}
-		printk(!error ? "okay\n" : "failed\n");
+		printk(!error ? "okay\n" : "failed\n");/*lint !e592*/
 	}
 }
 

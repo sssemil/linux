@@ -21,22 +21,45 @@
 #include <linux/bitops.h>
 #include <linux/elf.h>
 #include <linux/gfp.h>
+#include <linux/kasan.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/moduleloader.h>
 #include <linux/vmalloc.h>
+#include <linux/random.h>
 #include <asm/alternative.h>
 #include <asm/insn.h>
 #include <asm/sections.h>
+
+#ifdef CONFIG_HUAWEI_KERNEL_MODULE_RANDOMIZE
+#include <chipset_common/kernel_harden/kaslr.h>
+#endif
 
 #define	AARCH64_INSN_IMM_MOVNZ		AARCH64_INSN_IMM_MAX
 #define	AARCH64_INSN_IMM_MOVK		AARCH64_INSN_IMM_16
 
 void *module_alloc(unsigned long size)
 {
-	return __vmalloc_node_range(size, 1, MODULES_VADDR, MODULES_END,
-				    GFP_KERNEL, PAGE_KERNEL_EXEC, 0,
-				    NUMA_NO_NODE, __builtin_return_address(0));
+	void *p;
+
+#ifdef CONFIG_HUAWEI_KERNEL_MODULE_RANDOMIZE
+	p = __vmalloc_node_range(size, MODULE_ALIGN,
+				MODULES_VADDR + get_module_load_offset(),
+				MODULES_END,
+				GFP_KERNEL, PAGE_KERNEL_EXEC, 0,
+				NUMA_NO_NODE, __builtin_return_address(0));
+#else
+	p = __vmalloc_node_range(size, MODULE_ALIGN, MODULES_VADDR, MODULES_END,
+				GFP_KERNEL, PAGE_KERNEL_EXEC, 0,
+				NUMA_NO_NODE, __builtin_return_address(0));
+#endif
+
+	if (p && (kasan_module_alloc(p, size) < 0)) {
+		vfree(p);
+		return NULL;
+	}
+
+	return p;
 }
 
 enum aarch64_reloc_op {
@@ -65,15 +88,18 @@ static u64 do_reloc(enum aarch64_reloc_op reloc_op, void *place, u64 val)
 
 static int reloc_data(enum aarch64_reloc_op op, void *place, u64 val, int len)
 {
-	u64 imm_mask = (1 << len) - 1;
 	s64 sval = do_reloc(op, place, val);
 
 	switch (len) {
 	case 16:
 		*(s16 *)place = sval;
+		if (sval < S16_MIN || sval > U16_MAX)
+			return -ERANGE;
 		break;
 	case 32:
 		*(s32 *)place = sval;
+		if (sval < S32_MIN || sval > U32_MAX)
+			return -ERANGE;
 		break;
 	case 64:
 		*(s64 *)place = sval;
@@ -82,21 +108,6 @@ static int reloc_data(enum aarch64_reloc_op op, void *place, u64 val, int len)
 		pr_err("Invalid length (%d) for data relocation\n", len);
 		return 0;
 	}
-
-	/*
-	 * Extract the upper value bits (including the sign bit) and
-	 * shift them to bit 0.
-	 */
-	sval = (s64)(sval & ~(imm_mask >> 1)) >> (len - 1);
-
-	/*
-	 * Overflow has occurred if the value is not representable in
-	 * len bits (i.e the bottom len bits are not sign-extended and
-	 * the top bits are not all zero).
-	 */
-	if ((u64)(sval + 1) > 2)
-		return -ERANGE;
-
 	return 0;
 }
 
@@ -332,12 +343,14 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 			ovf = reloc_insn_imm(RELOC_OP_PREL, loc, val, 0, 21,
 					     AARCH64_INSN_IMM_ADR);
 			break;
+#ifndef CONFIG_ARM64_ERRATUM_843419
 		case R_AARCH64_ADR_PREL_PG_HI21_NC:
 			overflow_check = false;
 		case R_AARCH64_ADR_PREL_PG_HI21:
 			ovf = reloc_insn_imm(RELOC_OP_PAGE, loc, val, 12, 21,
 					     AARCH64_INSN_IMM_ADR);
 			break;
+#endif
 		case R_AARCH64_ADD_ABS_LO12_NC:
 		case R_AARCH64_LDST8_ABS_LO12_NC:
 			overflow_check = false;

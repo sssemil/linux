@@ -45,6 +45,19 @@
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
 
+#ifdef CONFIG_HUAWEI_KSTATE
+#include <huawei_platform/power/hw_kcollect.h>
+#endif
+
+#ifdef CONFIG_BOOST_KILL
+extern void hisi_get_fast_cpus(struct cpumask *cpumask);
+
+/* Add apportunity to config enable/disable boost
+ * killing action
+ */
+unsigned int sysctl_boost_killing;
+#endif
+
 /*
  * SLAB caches for signal bits.
  */
@@ -922,6 +935,9 @@ static void complete_signal(int sig, struct task_struct *p, int group)
 {
 	struct signal_struct *signal = p->signal;
 	struct task_struct *t;
+#ifdef CONFIG_BOOST_KILL
+	cpumask_t new_mask = CPU_MASK_NONE;
+#endif
 
 	/*
 	 * Now find a thread we can wake up to take the signal off the queue.
@@ -978,6 +994,14 @@ static void complete_signal(int sig, struct task_struct *p, int group)
 			signal->group_stop_count = 0;
 			t = p;
 			do {
+#ifdef CONFIG_BOOST_KILL
+				if (sysctl_boost_killing) {
+					if (can_nice(t, -20))
+						set_user_nice(t, -20);
+					hisi_get_fast_cpus(&new_mask);
+					do_set_cpus_allowed(t, &new_mask);
+				}
+#endif
 				task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 				sigaddset(&t->pending.signal, SIGKILL);
 				signal_wake_up(t, 1);
@@ -1187,6 +1211,12 @@ int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 {
 	unsigned long flags;
 	int ret = -ESRCH;
+
+#ifdef CONFIG_HUAWEI_KSTATE
+	if (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT) {
+		hwkillinfo(p->tgid, sig);
+	}
+#endif
 
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, group);
@@ -1803,6 +1833,14 @@ static inline int may_ptrace_stop(void)
 
 	return 1;
 }
+
+#ifdef CONFIG_HISI_SWAP_ZDATA
+int reclaim_sigusr_pending(struct task_struct *tsk)
+{
+	return	sigismember(&tsk->pending.signal, SIGUSR2) ||
+		sigismember(&tsk->signal->shared_pending.signal, SIGUSR2);
+}
+#endif
 
 /*
  * Return non-zero if there is a SIGKILL that should be waking us up.
@@ -2753,12 +2791,15 @@ int copy_siginfo_to_user(siginfo_t __user *to, const siginfo_t *from)
 		 * Other callers might not initialize the si_lsb field,
 		 * so check explicitly for the right codes here.
 		 */
-		if (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO)
+		if (from->si_signo == SIGBUS &&
+		    (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO))
 			err |= __put_user(from->si_addr_lsb, &to->si_addr_lsb);
 #endif
 #ifdef SEGV_BNDERR
-		err |= __put_user(from->si_lower, &to->si_lower);
-		err |= __put_user(from->si_upper, &to->si_upper);
+		if (from->si_signo == SIGSEGV && from->si_code == SEGV_BNDERR) {
+			err |= __put_user(from->si_lower, &to->si_lower);
+			err |= __put_user(from->si_upper, &to->si_upper);
+		}
 #endif
 		break;
 	case __SI_CHLD:
@@ -3022,7 +3063,7 @@ COMPAT_SYSCALL_DEFINE3(rt_sigqueueinfo,
 			int, sig,
 			struct compat_siginfo __user *, uinfo)
 {
-	siginfo_t info;
+	siginfo_t info = {};
 	int ret = copy_siginfo_from_user32(&info, uinfo);
 	if (unlikely(ret))
 		return ret;
@@ -3066,7 +3107,7 @@ COMPAT_SYSCALL_DEFINE4(rt_tgsigqueueinfo,
 			int, sig,
 			struct compat_siginfo __user *, uinfo)
 {
-	siginfo_t info;
+	siginfo_t info = {};
 
 	if (copy_siginfo_from_user32(&info, uinfo))
 		return -EFAULT;

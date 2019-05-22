@@ -30,6 +30,14 @@
 #include <linux/cleancache.h>
 #include "internal.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/android_fs.h>
+
+EXPORT_TRACEPOINT_SYMBOL(android_fs_datawrite_start);
+EXPORT_TRACEPOINT_SYMBOL(android_fs_datawrite_end);
+EXPORT_TRACEPOINT_SYMBOL(android_fs_dataread_start);
+EXPORT_TRACEPOINT_SYMBOL(android_fs_dataread_end);
+
 /*
  * I/O completion handler for multipage BIOs.
  *
@@ -47,6 +55,16 @@ static void mpage_end_io(struct bio *bio, int err)
 	struct bio_vec *bv;
 	int i;
 
+	if (trace_android_fs_dataread_end_enabled() &&
+	    (bio_data_dir(bio) == READ)) {
+		struct page *first_page = bio->bi_io_vec[0].bv_page;
+
+		if (first_page != NULL)
+			trace_android_fs_dataread_end(first_page->mapping->host,
+						      page_offset(first_page),
+						      bio->bi_iter.bi_size);
+	}
+
 	bio_for_each_segment_all(bv, bio, i) {
 		struct page *page = bv->bv_page;
 		page_endio(page, bio_data_dir(bio), err);
@@ -57,6 +75,18 @@ static void mpage_end_io(struct bio *bio, int err)
 
 static struct bio *mpage_bio_submit(int rw, struct bio *bio)
 {
+	if (trace_android_fs_dataread_start_enabled() && (rw == READ)) {
+		struct page *first_page = bio->bi_io_vec[0].bv_page;
+
+		if (first_page != NULL) {
+			trace_android_fs_dataread_start(
+				first_page->mapping->host,
+				page_offset(first_page),
+				bio->bi_iter.bi_size,
+				current->pid,
+				current->comm);
+		}
+	}
 	bio->bi_end_io = mpage_end_io;
 	guard_bio_eod(rw, bio);
 	submit_bio(rw, bio);
@@ -590,7 +620,7 @@ page_is_mapped:
 	 * This page will go to BIO.  Do we need to send this BIO off first?
 	 */
 	if (bio && mpd->last_block_in_bio != blocks[0] - 1)
-		bio = mpage_bio_submit(WRITE, bio);
+		bio = mpage_bio_submit(wbc_to_write_cmd(wbc), bio);
 
 alloc_new:
 	if (bio == NULL) {
@@ -614,7 +644,7 @@ alloc_new:
 	 */
 	length = first_unmapped << blkbits;
 	if (bio_add_page(bio, page, length, 0) < length) {
-		bio = mpage_bio_submit(WRITE, bio);
+		bio = mpage_bio_submit(wbc_to_write_cmd(wbc), bio);
 		goto alloc_new;
 	}
 
@@ -624,7 +654,7 @@ alloc_new:
 	set_page_writeback(page);
 	unlock_page(page);
 	if (boundary || (first_unmapped != blocks_per_page)) {
-		bio = mpage_bio_submit(WRITE, bio);
+		bio = mpage_bio_submit(wbc_to_write_cmd(wbc), bio);
 		if (boundary_block) {
 			write_boundary_block(boundary_bdev,
 					boundary_block, 1 << blkbits);
@@ -636,7 +666,7 @@ alloc_new:
 
 confused:
 	if (bio)
-		bio = mpage_bio_submit(WRITE, bio);
+		bio = mpage_bio_submit(wbc_to_write_cmd(wbc), bio);
 
 	if (mpd->use_writepage) {
 		ret = mapping->a_ops->writepage(page, wbc);

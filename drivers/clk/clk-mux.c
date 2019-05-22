@@ -50,7 +50,7 @@ static u8 clk_mux_get_parent(struct clk_hw *hw)
 
 		for (i = 0; i < num_parents; i++)
 			if (mux->table[i] == val)
-				return i;
+				return i;/*[false alarm]:return */
 		return -EINVAL;
 	}
 
@@ -101,10 +101,38 @@ static int clk_mux_set_parent(struct clk_hw *hw, u8 index)
 	return 0;
 }
 
+#ifdef CONFIG_HISI_CLK_DEBUG
+static int hisi_selreg_check(struct clk_hw *hw)
+{
+	struct clk_mux *mux = to_clk_mux(hw);
+	struct clk *clk = hw->clk;
+	u32 val = 0;
+
+	val = readl(mux->reg) >> mux->shift;
+	val &= mux->mask;
+	if (val && (mux->flags & CLK_MUX_INDEX_BIT))
+		val = ffs(val) - 1;
+
+	if (val && (mux->flags & CLK_MUX_INDEX_ONE))
+		val--;
+
+	if (NULL == __clk_get_parent(clk))
+		return 3;
+
+	if (clk_get_parent_by_index(clk, val) == __clk_get_parent(clk))
+		return 1;
+	else
+		return 0;
+}
+#endif
+
 const struct clk_ops clk_mux_ops = {
 	.get_parent = clk_mux_get_parent,
 	.set_parent = clk_mux_set_parent,
 	.determine_rate = __clk_mux_determine_rate,
+#ifdef CONFIG_HISI_CLK_DEBUG
+	.check_selreg = hisi_selreg_check,
+#endif
 };
 EXPORT_SYMBOL_GPL(clk_mux_ops);
 

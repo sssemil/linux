@@ -33,7 +33,9 @@
 #include <asm/hw_breakpoint.h>
 #include <asm/kdebug.h>
 #include <asm/traps.h>
+#include <asm/cpufeature.h>
 #include <asm/cputype.h>
+#include <asm/sysreg.h>
 #include <asm/system_misc.h>
 
 /* Breakpoint currently in use for each BRP. */
@@ -52,13 +54,17 @@ static int core_num_wrps;
 /* Determine number of BRP registers available. */
 static int get_num_brps(void)
 {
-	return ((read_cpuid(ID_AA64DFR0_EL1) >> 12) & 0xf) + 1;
+	return 1 +
+		cpuid_feature_extract_field(read_system_reg(SYS_ID_AA64DFR0_EL1),
+						ID_AA64DFR0_BRPS_SHIFT);
 }
 
 /* Determine number of WRP registers available. */
 static int get_num_wrps(void)
 {
-	return ((read_cpuid(ID_AA64DFR0_EL1) >> 20) & 0xf) + 1;
+	return 1 +
+		cpuid_feature_extract_field(read_system_reg(SYS_ID_AA64DFR0_EL1),
+						ID_AA64DFR0_WRPS_SHIFT);
 }
 
 int hw_breakpoint_slots(int type)
@@ -451,6 +457,26 @@ static int arch_build_bp_info(struct perf_event *bp)
 	/* Address */
 	info->address = bp->attr.bp_addr;
 
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+	/* Address Mask */
+	if (bp->attr.bp_addr_mask != ARM_WATCHPOINT_ADDR_MASK_0) {
+		if ((bp->attr.bp_addr_mask < ARM_WATCHPOINT_ADDR_MASK_3) ||
+			(bp->attr.bp_addr_mask > ARM_WATCHPOINT_ADDR_MASK_MAX)) {
+			/*1 and 2 is reserved, the max value is 31 */
+			return -EINVAL;
+		}
+
+		/* len should be LEN_8 */
+		if (info->ctrl.len != ARM_BREAKPOINT_LEN_8) {
+			return -EINVAL;
+		}
+	}
+
+	/* Address Mask */
+	info->ctrl.mask = bp->attr.bp_addr_mask;
+	info->ctrl.ssc = ARM_SSC_NON_SECURE;
+#endif
+
 	/*
 	 * Privilege
 	 * Note that we disallow combined EL0/EL1 breakpoints because
@@ -522,6 +548,16 @@ int arch_validate_hwbkpt_settings(struct perf_event *bp)
 		if (info->address & alignment_mask)
 			return -EINVAL;
 	}
+
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+	/* Address Mask */
+	if (info->ctrl.mask != ARM_WATCHPOINT_ADDR_MASK_0) {
+		if (info->address & ((1<< info->ctrl.mask) - 1)) {
+			/* addr is size aligned */
+			return -EINVAL;
+		}
+	}
+#endif
 
 	/*
 	 * Disallow per-task kernel breakpoints since these would
@@ -688,6 +724,14 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 
 		/* Check if the watchpoint value matches. */
 		val = read_wb_reg(AARCH64_DBG_REG_WVR, i);
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+		/* check addr range */
+		if (info->ctrl.mask != ARM_WATCHPOINT_ADDR_MASK_0) {
+			if (val != (addr & ~((1 << info->ctrl.mask) - 1))) {
+				goto unlock;
+			}
+		} else
+#endif
 		if (val != (addr & ~alignment_mask))
 			goto unlock;
 
@@ -709,9 +753,14 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 		info->trigger = addr;
 		perf_bp_event(wp, regs);
 
+#ifdef CONFIG_HAVE_HW_BREAKPOINT_ADDR_MASK
+		/* We need to handle the stepping */
+		step = 1;
+#else
 		/* Do we need to handle the stepping? */
 		if (!wp->overflow_handler)
 			step = 1;
+#endif
 
 unlock:
 		rcu_read_unlock();
@@ -952,3 +1001,4 @@ int hw_breakpoint_exceptions_notify(struct notifier_block *unused,
 {
 	return NOTIFY_DONE;
 }
+

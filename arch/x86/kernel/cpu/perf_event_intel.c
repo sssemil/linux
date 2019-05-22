@@ -2098,8 +2098,11 @@ static struct event_constraint *
 intel_get_event_constraints(struct cpu_hw_events *cpuc, int idx,
 			    struct perf_event *event)
 {
-	struct event_constraint *c1 = cpuc->event_constraint[idx];
+	struct event_constraint *c1 = NULL;
 	struct event_constraint *c2;
+
+	if (idx >= 0) /* fake does < 0 */
+		c1 = cpuc->event_constraint[idx];
 
 	/*
 	 * first time only
@@ -2611,7 +2614,7 @@ static void intel_pmu_cpu_starting(int cpu)
 	if (!(x86_pmu.flags & PMU_FL_NO_HT_SHARING)) {
 		void **onln = &cpuc->kfree_on_online[X86_PERF_KFREE_SHARED];
 
-		for_each_cpu(i, topology_thread_cpumask(cpu)) {
+		for_each_cpu(i, topology_sibling_cpumask(cpu)) {
 			struct intel_shared_regs *pc;
 
 			pc = per_cpu(cpu_hw_events, i).shared_regs;
@@ -2629,7 +2632,7 @@ static void intel_pmu_cpu_starting(int cpu)
 		cpuc->lbr_sel = &cpuc->shared_regs->regs[EXTRA_REG_LBR];
 
 	if (x86_pmu.flags & PMU_FL_EXCL_CNTRS) {
-		for_each_cpu(i, topology_thread_cpumask(cpu)) {
+		for_each_cpu(i, topology_sibling_cpumask(cpu)) {
 			struct intel_excl_cntrs *c;
 
 			c = per_cpu(cpu_hw_events, i).excl_cntrs;
@@ -3253,6 +3256,8 @@ __init int intel_pmu_init(void)
 
 	case 61: /* 14nm Broadwell Core-M */
 	case 86: /* 14nm Broadwell Xeon D */
+	case 71: /* 14nm Broadwell + GT3e (Intel Iris Pro graphics) */
+	case 79: /* 14nm Broadwell Server */
 		x86_pmu.late_ack = true;
 		memcpy(hw_cache_event_ids, hsw_hw_cache_event_ids, sizeof(hw_cache_event_ids));
 		memcpy(hw_cache_extra_regs, hsw_hw_cache_extra_regs, sizeof(hw_cache_extra_regs));
@@ -3322,13 +3327,13 @@ __init int intel_pmu_init(void)
 		 * counter, so do not extend mask to generic counters
 		 */
 		for_each_event_constraint(c, x86_pmu.event_constraints) {
-			if (c->cmask != FIXED_EVENT_FLAGS
-			    || c->idxmsk64 == INTEL_PMC_MSK_FIXED_REF_CYCLES) {
-				continue;
+			if (c->cmask == FIXED_EVENT_FLAGS
+			    && c->idxmsk64 != INTEL_PMC_MSK_FIXED_REF_CYCLES) {
+				c->idxmsk64 |= (1ULL << x86_pmu.num_counters) - 1;
 			}
-
-			c->idxmsk64 |= (1ULL << x86_pmu.num_counters) - 1;
-			c->weight += x86_pmu.num_counters;
+			c->idxmsk64 &=
+				~(~0UL << (INTEL_PMC_IDX_FIXED + x86_pmu.num_counters_fixed));
+			c->weight = hweight64(c->idxmsk64);
 		}
 	}
 
@@ -3386,7 +3391,7 @@ static __init int fixup_ht_bug(void)
 	if (!(x86_pmu.flags & PMU_FL_EXCL_ENABLED))
 		return 0;
 
-	w = cpumask_weight(topology_thread_cpumask(cpu));
+	w = cpumask_weight(topology_sibling_cpumask(cpu));
 	if (w > 1) {
 		pr_info("PMU erratum BJ122, BV98, HSD29 worked around, HT is on\n");
 		return 0;

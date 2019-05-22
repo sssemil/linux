@@ -365,6 +365,26 @@ static int upgrade_mode(struct dm_dev_internal *dd, fmode_t new_mode,
 }
 
 /*
+ * Convert the path to a device
+ */
+dev_t dm_get_dev_t(const char *path)
+{
+	dev_t uninitialized_var(dev);
+	struct block_device *bdev;
+
+	bdev = lookup_bdev(path);
+	if (IS_ERR(bdev))
+		dev = name_to_dev_t(path);
+	else {
+		dev = bdev->bd_dev;
+		bdput(bdev);
+	}
+
+	return dev;
+}
+EXPORT_SYMBOL_GPL(dm_get_dev_t);
+
+/*
  * Add a device to the list, or just increment the usage count if
  * it's already present.
  */
@@ -372,23 +392,15 @@ int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
 		  struct dm_dev **result)
 {
 	int r;
-	dev_t uninitialized_var(dev);
+	dev_t dev;
 	struct dm_dev_internal *dd;
 	struct dm_table *t = ti->table;
-	struct block_device *bdev;
 
 	BUG_ON(!t);
 
-	/* convert the path to a device */
-	bdev = lookup_bdev(path);
-	if (IS_ERR(bdev)) {
-		dev = name_to_dev_t(path);
-		if (!dev)
-			return -ENODEV;
-	} else {
-		dev = bdev->bd_dev;
-		bdput(bdev);
-	}
+	dev = dm_get_dev_t(path);
+	if (!dev)
+		return -ENODEV;
 
 	dd = find_device(&t->devices, dev);
 	if (!dd) {
@@ -826,6 +838,19 @@ static bool __table_type_request_based(unsigned table_type)
 		table_type == DM_TYPE_MQ_REQUEST_BASED);
 }
 
+static void dm_flush_async_set(struct dm_table *t)
+{
+	struct dm_dev_internal *dd;
+	struct list_head *devices;
+	dm_setup_md_queue_flush_async(t->md,1);
+	devices = dm_table_get_devices(t);
+	list_for_each_entry(dd, devices, list) {/*lint !e64 !e826*/
+		struct request_queue *q = bdev_get_queue(dd->dm_dev->bdev);
+		if(blk_queue_flush_async_support(q)==0)
+			dm_setup_md_queue_flush_async(t->md,0);
+	}
+}
+
 static int dm_table_set_type(struct dm_table *t)
 {
 	unsigned i;
@@ -835,6 +860,8 @@ static int dm_table_set_type(struct dm_table *t)
 	struct dm_dev_internal *dd;
 	struct list_head *devices;
 	unsigned live_md_type = dm_get_md_type(t->md);
+
+	dm_flush_async_set(t);
 
 	for (i = 0; i < t->num_targets; i++) {
 		tgt = t->targets + i;
@@ -1314,13 +1341,13 @@ static void dm_table_set_integrity(struct dm_table *t)
 static int device_flush_capable(struct dm_target *ti, struct dm_dev *dev,
 				sector_t start, sector_t len, void *data)
 {
-	unsigned flush = (*(unsigned *)data);
+	unsigned long flush = (unsigned long) data;
 	struct request_queue *q = bdev_get_queue(dev->bdev);
 
-	return q && (q->flush_flags & flush);
+	return q && (q->queue_flags & flush);
 }
 
-static bool dm_table_supports_flush(struct dm_table *t, unsigned flush)
+static bool dm_table_supports_flush(struct dm_table *t, unsigned long flush)
 {
 	struct dm_target *ti;
 	unsigned i = 0;
@@ -1341,7 +1368,7 @@ static bool dm_table_supports_flush(struct dm_table *t, unsigned flush)
 			return true;
 
 		if (ti->type->iterate_devices &&
-		    ti->type->iterate_devices(ti, device_flush_capable, &flush))
+		    ti->type->iterate_devices(ti, device_flush_capable, (void *) flush))
 			return true;
 	}
 
@@ -1480,7 +1507,7 @@ static bool dm_table_supports_discards(struct dm_table *t)
 void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 			       struct queue_limits *limits)
 {
-	unsigned flush = 0;
+	bool wc = false, fua = false;
 
 	/*
 	 * Copy table's limits to the DM device's request_queue
@@ -1492,12 +1519,12 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	else
 		queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 
-	if (dm_table_supports_flush(t, REQ_FLUSH)) {
-		flush |= REQ_FLUSH;
-		if (dm_table_supports_flush(t, REQ_FUA))
-			flush |= REQ_FUA;
+	if (dm_table_supports_flush(t, (1UL << QUEUE_FLAG_WC))) {
+		wc = true;
+		if (dm_table_supports_flush(t, (1UL << QUEUE_FLAG_FUA)))
+			fua = true;
 	}
-	blk_queue_flush(q, flush);
+	blk_queue_write_cache(q, wc, fua);
 
 	if (!dm_table_discard_zeroes_data(t))
 		q->limits.discard_zeroes_data = 0;

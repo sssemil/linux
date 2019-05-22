@@ -35,8 +35,26 @@
 #define PFT_ARCH_V1_0		0x30
 #define PFT_ARCH_V1_1		0x31
 
-#define CORESIGHT_UNLOCK	0xc5acce55
+#define SNID_MASK 				(BIT(7)|BIT(6)) /* Secure non-invasive debug */
+#define SNID_DEBUG_ENABLE 		(BIT(7)|BIT(6))
+#define SNID_DEBUG_DISABLE 		BIT(7)
 
+#define SID_MASK 				(BIT(5)|BIT(4)) /* Secure invasive debug*/
+#define SID_DEBUG_ENABLE 		(BIT(5)|BIT(4))
+#define SID_DEBUG_DISABLE 		BIT(5)
+
+#define NSNID_MASK 				(BIT(3)|BIT(2))/*Non-secure non-invasive debug*/
+#define NSNID_DEBUG_ENABLE 		(BIT(3)|BIT(2))
+#define NSNID_DEBUG_DISABLE 	BIT(3)
+
+
+#define NSID_MASK (BIT(1)|BIT(0)) /* Non-secure invasive debug*/
+#define NSID_DEBUG_ENABLE (BIT(1)|BIT(0))
+#define NSID_DEBUG_DISABLE BIT(1)
+
+#define CORESIGHT_UNLOCK	0xc5acce55
+#define err_print(fmt, ...)  	printk(KERN_ERR "%s: "fmt, __func__, ##__VA_ARGS__)
+#define info_print(fmt, ...)  	printk(KERN_INFO "%s: "fmt, __func__, ##__VA_ARGS__)
 extern struct bus_type coresight_bustype;
 
 enum coresight_dev_type {
@@ -229,6 +247,15 @@ extern int coresight_enable(struct coresight_device *csdev);
 extern void coresight_disable(struct coresight_device *csdev);
 extern int coresight_timeout(void __iomem *addr, u32 offset,
 			     int position, int value);
+extern unsigned int coresight_access_enabled(void);
+extern void coresight_refresh_path(struct coresight_device *csdev, int enable);
+extern int _etm4_cpuilde_restore(void);
+extern int check_cpu_online(struct coresight_device *csdev);
+extern void etm4_disable_all(void);
+extern void *get_etb_drvdata_bydevnode(struct device_node *np);
+extern int etbetf_restore(void *drv);
+extern void *get_funnel_drvdata_bydevnode(struct device_node *np);
+extern int funnel_restore(void *drv);
 #else
 static inline struct coresight_device *
 coresight_register(struct coresight_desc *desc) { return NULL; }
@@ -238,14 +265,29 @@ coresight_enable(struct coresight_device *csdev) { return -ENOSYS; }
 static inline void coresight_disable(struct coresight_device *csdev) {}
 static inline int coresight_timeout(void __iomem *addr, u32 offset,
 				     int position, int value) { return 1; }
+static inline unsigned int coresight_access_enabled(void) {}
+static inline int _etm4_cpuilde_restore(void) {}
+static inline void etm4_disable_all(void) {}
+static inline void *get_etb_drvdata_bydevnode(struct device_node *np) { return NULL; }
+static inline int etbetf_restore(void *drv) { return -1; }
+static inline void *get_funnel_drvdata_bydevnode(struct device_node *np) { return NULL; }
+static inline int funnel_restore(void *drv) { return -1; }
 #endif
 
 #ifdef CONFIG_OF
 extern struct coresight_platform_data *of_get_coresight_platform_data(
 				struct device *dev, struct device_node *node);
+extern struct device_node *of_get_coresight_etb_data(
+				struct device *dev, struct device_node *node);
+extern struct device_node *of_get_coresight_funnel_data(
+				struct device *dev, struct device_node *node);
 #else
 static inline struct coresight_platform_data *of_get_coresight_platform_data(
 	struct device *dev, struct device_node *node) { return NULL; }
+static inline struct device_node *of_get_coresight_etb_data(
+				struct device *dev, struct device_node *node) { return NULL; }
+static inline struct device_node *of_get_coresight_funnel_data(
+				struct device *dev, struct device_node *node) { return NULL; }
 #endif
 
 #endif

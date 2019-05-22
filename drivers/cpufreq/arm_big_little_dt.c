@@ -54,7 +54,7 @@ static int dt_init_opp_table(struct device *cpu_dev)
 		return -ENOENT;
 	}
 
-	ret = of_init_opp_table(cpu_dev);
+	ret = dev_pm_opp_of_add_table(cpu_dev);
 	of_node_put(np);
 
 	return ret;
@@ -82,7 +82,7 @@ static struct cpufreq_arm_bL_ops dt_bL_ops = {
 	.name	= "dt-bl",
 	.get_transition_latency = dt_get_transition_latency,
 	.init_opp_table = dt_init_opp_table,
-	.free_opp_table = of_free_opp_table,
+	.free_opp_table = dev_pm_opp_of_remove_table,
 };
 
 static int generic_bL_probe(struct platform_device *pdev)
@@ -103,9 +103,24 @@ static int generic_bL_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_HISI_CPUFREQ
+#ifdef CONFIG_OF
+static const struct of_device_id generic_bL_cpufreq[] = {
+	{ .compatible = "arm,generic-bL-cpufreq" },
+	{},
+};
+MODULE_DEVICE_TABLE(of, generic_bL_cpufreq);
+#endif
+#endif
+
 static struct platform_driver generic_bL_platdrv = {
 	.driver = {
 		.name	= "arm-bL-cpufreq-dt",
+#ifdef CONFIG_HISI_CPUFREQ
+#ifdef CONFIG_OF
+		.of_match_table = of_match_ptr(generic_bL_cpufreq),
+#endif
+#endif
 	},
 	.probe		= generic_bL_probe,
 	.remove		= generic_bL_remove,

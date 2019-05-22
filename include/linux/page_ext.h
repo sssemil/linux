@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/stacktrace.h>
+#include <linux/hisi/page_tracker.h>
 
 struct pglist_data;
 struct page_ext_operations {
@@ -26,6 +27,7 @@ enum page_ext_flags {
 	PAGE_EXT_DEBUG_POISON,		/* Page is poisoned */
 	PAGE_EXT_DEBUG_GUARD,
 	PAGE_EXT_OWNER,
+	PAGE_EXT_TRACKER,
 };
 
 /*
@@ -42,6 +44,9 @@ struct page_ext {
 	gfp_t gfp_mask;
 	unsigned int nr_entries;
 	unsigned long trace_entries[8];
+#endif
+#ifdef CONFIG_HISI_PAGE_TRACKER
+	struct page_tracker page_tracker;
 #endif
 };
 

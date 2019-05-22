@@ -119,6 +119,7 @@ static ssize_t priority_show(struct device *dev,
 	struct funnel_drvdata *drvdata = dev_get_drvdata(dev->parent);
 	unsigned long val = drvdata->priority;
 
+	/* cppcheck-suppress * */
 	return sprintf(buf, "%#lx\n", val);
 }
 

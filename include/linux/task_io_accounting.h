@@ -42,4 +42,9 @@ struct task_io_accounting {
 	 */
 	u64 cancelled_write_bytes;
 #endif /* CONFIG_TASK_IO_ACCOUNTING */
+#ifdef CONFIG_HUAWEI_IO_MONITOR 
+    u64 fg_read_bytes;
+    u64 fg_write_bytes;
+#endif
+
 };

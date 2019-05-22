@@ -9,6 +9,10 @@
 #ifdef CONFIG_TASK_IO_ACCOUNTING
 static inline void task_io_account_read(size_t bytes)
 {
+#ifdef CONFIG_HUAWEI_IO_MONITOR
+    if(adjust_process_group(current) == process_root_group)
+        current->ioac.fg_read_bytes += bytes;
+#endif
 	current->ioac.read_bytes += bytes;
 }
 
@@ -23,6 +27,10 @@ static inline unsigned long task_io_get_inblock(const struct task_struct *p)
 
 static inline void task_io_account_write(size_t bytes)
 {
+#ifdef CONFIG_HUAWEI_IO_MONITOR
+    if(adjust_process_group(current) == process_root_group)
+        current->ioac.fg_write_bytes += bytes;
+#endif
 	current->ioac.write_bytes += bytes;
 }
 
@@ -51,6 +59,10 @@ static inline void task_blk_io_accounting_add(struct task_io_accounting *dst,
 	dst->read_bytes += src->read_bytes;
 	dst->write_bytes += src->write_bytes;
 	dst->cancelled_write_bytes += src->cancelled_write_bytes;
+#ifdef CONFIG_HUAWEI_IO_MONITOR
+    dst->fg_read_bytes += src->fg_read_bytes;
+    dst->fg_write_bytes += src->fg_write_bytes;
+#endif
 }
 
 #else

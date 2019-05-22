@@ -50,6 +50,11 @@ static void clk_gate_endisable(struct clk_hw *hw, int enable)
 
 	set ^= enable;
 
+#ifdef CONFIG_HISI_CLK
+	#define CLK_GATE_ALWAYS_ON_MASK   0x4
+	if ((!set) && (gate->flags & CLK_GATE_ALWAYS_ON_MASK))
+		return;
+#endif
 	if (gate->lock)
 		spin_lock_irqsave(gate->lock, flags);
 
@@ -81,7 +86,9 @@ static int clk_gate_enable(struct clk_hw *hw)
 
 static void clk_gate_disable(struct clk_hw *hw)
 {
+#ifndef CONFIG_HISI_CLK_ALWAYS_ON
 	clk_gate_endisable(hw, 0);
+#endif
 }
 
 static int clk_gate_is_enabled(struct clk_hw *hw)
@@ -144,7 +151,7 @@ struct clk *clk_register_gate(struct device *dev, const char *name,
 	init.name = name;
 	init.ops = &clk_gate_ops;
 	init.flags = flags | CLK_IS_BASIC;
-	init.parent_names = (parent_name ? &parent_name: NULL);
+	init.parent_names = (parent_name ? &parent_name : NULL);
 	init.num_parents = (parent_name ? 1 : 0);
 
 	/* struct clk_gate assignments */

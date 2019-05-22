@@ -441,6 +441,14 @@ config BATTERY_RT5033
 
 source "drivers/power/reset/Kconfig"
 
+config POWER_HISI
+    bool "hisilicon power charger/coul driver"
+    default n
+	help
+
+if POWER_HISI
+source "drivers/power/hisi/Kconfig"
+endif
 endif # POWER_SUPPLY
 
 source "drivers/power/avs/Kconfig"

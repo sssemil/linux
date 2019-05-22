@@ -28,9 +28,7 @@
 #include "interrupts_head.S"
 
 	.text
-
-__kvm_hyp_code_start:
-	.globl __kvm_hyp_code_start
+	.pushsection	.hyp.text, "ax"
 
 /********************************************************************
  * Flush per-VMID TLBs
@@ -170,13 +168,9 @@ __kvm_vcpu_return:
 	@ Don't trap coprocessor accesses for host kernel
 	set_hstr vmexit
 	set_hdcr vmexit
-	set_hcptr vmexit, (HCPTR_TTA | HCPTR_TCP(10) | HCPTR_TCP(11))
+	set_hcptr vmexit, (HCPTR_TTA | HCPTR_TCP(10) | HCPTR_TCP(11)), after_vfp_restore
 
 #ifdef CONFIG_VFPv3
-	@ Save floating point registers we if let guest use them.
-	tst	r2, #(HCPTR_TCP(10) | HCPTR_TCP(11))
-	bne	after_vfp_restore
-
 	@ Switch VFP/NEON hardware state to the host's
 	add	r7, vcpu, #VCPU_VFP_GUEST
 	store_vfp_state r7
@@ -188,6 +182,8 @@ after_vfp_restore:
 	@ Restore FPEXC_EN which we clobbered on entry
 	pop	{r2}
 	VFPFMXR FPEXC, r2
+#else
+after_vfp_restore:
 #endif
 
 	@ Reset Hyp-role
@@ -315,8 +311,6 @@ THUMB(	orr	r2, r2, #PSR_T_BIT	)
 	clrex				@ Clear exclusive monitor
 	eret
 .endm
-
-	.text
 
 	.align 5
 __kvm_hyp_vector:
@@ -483,7 +477,7 @@ switch_to_guest_vfp:
 	push	{r3-r7}
 
 	@ NEON/VFP used.  Turn on VFP access.
-	set_hcptr vmexit, (HCPTR_TCP(10) | HCPTR_TCP(11))
+	set_hcptr vmtrap, (HCPTR_TCP(10) | HCPTR_TCP(11))
 
 	@ Switch VFP/NEON hardware state to the guest's
 	add	r7, r0, #VCPU_VFP_HOST
@@ -511,10 +505,9 @@ hyp_fiq:
 
 	.ltorg
 
-__kvm_hyp_code_end:
-	.globl	__kvm_hyp_code_end
+	.popsection
 
-	.section ".rodata"
+	.pushsection ".rodata"
 
 und_die_str:
 	.ascii	"unexpected undefined exception in Hyp mode at: %#08x\n"
@@ -524,3 +517,5 @@ dabt_die_str:
 	.ascii	"unexpected data abort in Hyp mode at: %#08x\n"
 svc_die_str:
 	.ascii	"unexpected HVC/SVC trap in Hyp mode at: %#08x\n"
+
+	.popsection

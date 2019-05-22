@@ -459,4 +459,17 @@ config CRYPTO_DEV_IMGTEC_HASH
 	  hardware hash accelerator. Supporting MD5/SHA1/SHA224/SHA256
 	  hashing algorithms.
 
+config CRYPTO_DEV_DX_CC63P
+	tristate "Driver for Discretix dx_cc63p crypto hardwareacceleration"
+	select CRYPTO_ALGAPI
+	default n
+	help
+	  This optiontion allows you to have support for Discretix dx_cc63p
+	  acceleration.
+
+
+if CRYPTO_DEV_DX_CC63P
+	source "drivers/crypto/dx_ccp63/Kconfig"
+endif # if CRYPTO_DEV_DX_CC63P
+
 endif # CRYPTO_HW

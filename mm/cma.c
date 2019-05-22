@@ -39,6 +39,10 @@
 
 #include "cma.h"
 
+#ifdef CONFIG_HISI_CMA_DEBUG
+#include <linux/hisi/hisi_cma_debug.h>
+#endif
+
 struct cma cma_areas[MAX_CMA_AREAS];
 unsigned cma_area_count;
 static DEFINE_MUTEX(cma_mutex);
@@ -182,7 +186,7 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	if (!size || !memblock_is_region_reserved(base, size))
 		return -EINVAL;
 
-	/* ensure minimal alignment requied by mm core */
+	/* ensure minimal alignment required by mm core */
 	alignment = PAGE_SIZE << max(MAX_ORDER - 1, pageblock_order);
 
 	/* alignment should be aligned with order_per_bit */
@@ -238,7 +242,7 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	/*
 	 * high_memory isn't direct mapped memory so retrieving its physical
 	 * address isn't appropriate.  But it would be useful to check the
-	 * physical address of the highmem boundary so it's justfiable to get
+	 * physical address of the highmem boundary so it's justifiable to get
 	 * the physical address from it.  On x86 there is a validation check for
 	 * this case, so the following workaround is needed to avoid it.
 	 */
@@ -359,8 +363,13 @@ err:
  * This function allocates part of contiguous memory on specific
  * contiguous memory area.
  */
-struct page *cma_alloc(struct cma *cma, unsigned int count, unsigned int align)
+struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align)
 {
+#ifdef CONFIG_HISI_CMA_DEBUG
+	unsigned int used = 0;
+	unsigned long maxchunk = 0;
+	unsigned long fail_nr = 0;
+#endif
 	unsigned long mask, offset, pfn, start = 0;
 	unsigned long bitmap_maxno, bitmap_no, bitmap_count;
 	struct page *page = NULL;
@@ -369,7 +378,7 @@ struct page *cma_alloc(struct cma *cma, unsigned int count, unsigned int align)
 	if (!cma || !cma->count)
 		return NULL;
 
-	pr_debug("%s(cma %p, count %d, align %d)\n", __func__, (void *)cma,
+	pr_debug("%s(cma %p, count %zu, align %d)\n", __func__, (void *)cma,
 		 count, align);
 
 	if (!count)
@@ -387,6 +396,10 @@ struct page *cma_alloc(struct cma *cma, unsigned int count, unsigned int align)
 				offset);
 		if (bitmap_no >= bitmap_maxno) {
 			mutex_unlock(&cma->lock);
+#ifdef CONFIG_HISI_CMA_DEBUG
+			pr_info("bitmap_no %ld >= bitmap_maxno %ld\n", bitmap_no, bitmap_maxno);
+			ret = -ENOMEM;
+#endif
 			break;
 		}
 		bitmap_set(cma->bitmap, bitmap_no, bitmap_count);
@@ -414,11 +427,30 @@ struct page *cma_alloc(struct cma *cma, unsigned int count, unsigned int align)
 			 __func__, pfn_to_page(pfn));
 		/* try again with a bit different memory target */
 		start = bitmap_no + mask + 1;
+#ifdef CONFIG_HISI_CMA_DEBUG
+		fail_nr++;
+#endif
 	}
+#ifdef CONFIG_HISI_CMA_DEBUG
+	if (ret) {
+		used = cma_bitmap_used(cma);
+		maxchunk = cma_bitmap_maxchunk(cma);
+		pr_info("total %lu KB mask 0x%lx used %u KB "
+				"maxchunk %lu KB alloc %lu KB fail %lu times\n",
+					cma->count << (PAGE_SHIFT - 10), mask,
+					used << (PAGE_SHIFT - 10),
+					maxchunk << (PAGE_SHIFT - 10),
+					count << (PAGE_SHIFT - 10), fail_nr);
+	}
+#endif
 
 	trace_cma_alloc(page ? pfn : -1UL, page, count, align);
 
 	pr_debug("%s(): returned %p\n", __func__, page);
+#ifdef CONFIG_FREE_PAGES_RDONLY
+	if(page)
+		kernel_map_pages(page, count, 1);
+#endif
 	return page;
 }
 
@@ -438,8 +470,6 @@ bool cma_release(struct cma *cma, const struct page *pages, unsigned int count)
 
 	if (!cma || !pages)
 		return false;
-
-	pr_debug("%s(page %p)\n", __func__, (void *)pages);
 
 	pfn = page_to_pfn(pages);
 

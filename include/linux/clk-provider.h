@@ -36,6 +36,51 @@ struct clk_hw;
 struct clk_core;
 struct dentry;
 
+/***    private data structures    ***/
+
+struct clk_core {
+	const char		*name;
+	const struct clk_ops	*ops;
+	struct clk_hw		*hw;
+	struct module		*owner;
+	struct clk_core		*parent;
+	const char		**parent_names;
+	struct clk_core		**parents;
+	u8			num_parents;
+	u8			new_parent_index;
+	unsigned long		rate;
+	unsigned long		req_rate;
+	unsigned long		new_rate;
+	struct clk_core		*new_parent;
+	struct clk_core		*new_child;
+	unsigned long		flags;
+	unsigned int		enable_count;
+	unsigned int		prepare_count;
+	unsigned long		accuracy;
+	int			phase;
+	struct hlist_head	children;
+	struct hlist_node	child_node;
+	struct hlist_node	debug_node;
+	struct hlist_head	clks;
+	unsigned int		notifier_count;
+#ifdef CONFIG_HISI_CLK_DEBUG
+	struct list_head    node;
+#endif
+#ifdef CONFIG_DEBUG_FS
+	struct dentry		*dentry;
+#endif
+	struct kref		ref;
+};
+
+struct clk {
+	struct clk_core	*core;
+	const char *dev_id;
+	const char *con_id;
+	unsigned long min_rate;
+	unsigned long max_rate;
+	struct hlist_node clks_node;
+};
+
 /**
  * struct clk_ops -  Callback operations for hardware clocks; these are to
  * be provided by the clock implementation, and will be called by drivers
@@ -170,6 +215,14 @@ struct clk_ops {
 	int		(*enable)(struct clk_hw *hw);
 	void		(*disable)(struct clk_hw *hw);
 	int		(*is_enabled)(struct clk_hw *hw);
+#ifdef CONFIG_HISI_CLK_DEBUG
+	int		(*check_selreg)(struct clk_hw *hw);
+	int		(*check_divreg)(struct clk_hw *hw);
+	void __iomem *(*get_reg)(struct clk_hw *hw);
+#endif
+#ifdef CONFIG_HISI_CLK
+	int		(*get_source)(struct clk_hw *hw);
+#endif
 	void		(*disable_unused)(struct clk_hw *hw);
 	unsigned long	(*recalc_rate)(struct clk_hw *hw,
 					unsigned long parent_rate);

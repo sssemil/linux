@@ -74,6 +74,10 @@
 #include "blk.h"
 #include "blk-mq.h"
 
+#include "hisi-blk-mq.h"
+#include "hisi-blk-mq-dispatch-strategy.h"
+#include "hisi-blk-mq-debug.h"
+
 /* FLUSH/FUA sequences */
 enum {
 	REQ_FSEQ_PREFLUSH	= (1 << 0), /* pre-flushing in progress */
@@ -94,17 +98,18 @@ enum {
 static bool blk_kick_flush(struct request_queue *q,
 			   struct blk_flush_queue *fq);
 
-static unsigned int blk_flush_policy(unsigned int fflags, struct request *rq)
+static unsigned int blk_flush_policy(unsigned long fflags, struct request *rq)
 {
 	unsigned int policy = 0;
 
 	if (blk_rq_sectors(rq))
 		policy |= REQ_FSEQ_DATA;
 
-	if (fflags & REQ_FLUSH) {
+	if (fflags & (1UL << QUEUE_FLAG_WC)) {
 		if (rq->cmd_flags & REQ_FLUSH)
 			policy |= REQ_FSEQ_PREFLUSH;
-		if (!(fflags & REQ_FUA) && (rq->cmd_flags & REQ_FUA))
+		if (!(fflags & (1UL << QUEUE_FLAG_FUA)) &&
+		    (rq->cmd_flags & REQ_FUA))
 			policy |= REQ_FSEQ_POSTFLUSH;
 	}
 	return policy;
@@ -312,6 +317,7 @@ static bool blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq)
 	 */
 	if (q->mq_ops) {
 		flush_rq->mq_ctx = first_rq->mq_ctx;
+		flush_rq->mq_ctx_dispatch = first_rq->mq_ctx_dispatch;
 		flush_rq->tag = first_rq->tag;
 	}
 
@@ -319,6 +325,10 @@ static bool blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq)
 	flush_rq->cmd_flags = WRITE_FLUSH | REQ_FLUSH_SEQ;
 	flush_rq->rq_disk = first_rq->rq_disk;
 	flush_rq->end_io = flush_end_io;
+
+	hisi_blk_mq_init_req_timestamp(flush_rq);
+
+	blk_mq_debug_rq_processing_state_update(flush_rq, MQ_PROCESS_FLUSH_INIT);
 
 	return blk_flush_queue_rq(flush_rq, false);
 }
@@ -371,7 +381,7 @@ static void mq_flush_data_end_io(struct request *rq, int error)
 void blk_insert_flush(struct request *rq)
 {
 	struct request_queue *q = rq->q;
-	unsigned int fflags = q->flush_flags;	/* may change, cache */
+	unsigned long fflags = q->queue_flags;	/* may change, cache */
 	unsigned int policy = blk_flush_policy(fflags, rq);
 	struct blk_flush_queue *fq = blk_get_flush_queue(q, rq->mq_ctx);
 
@@ -380,7 +390,7 @@ void blk_insert_flush(struct request *rq)
 	 * REQ_FLUSH and FUA for the driver.
 	 */
 	rq->cmd_flags &= ~REQ_FLUSH;
-	if (!(fflags & REQ_FUA))
+	if (!(fflags & (1UL << QUEUE_FLAG_FUA)))
 		rq->cmd_flags &= ~REQ_FUA;
 
 	/*

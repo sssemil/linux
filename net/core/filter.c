@@ -47,9 +47,10 @@
 #include <linux/bpf.h>
 
 /**
- *	sk_filter - run a packet through a socket filter
+ *	sk_filter_trim_cap - run a packet through a socket filter
  *	@sk: sock associated with &sk_buff
  *	@skb: buffer to filter
+ *	@cap: limit on how short the eBPF program may trim the packet
  *
  * Run the filter code and then cut skb->data to correct size returned by
  * SK_RUN_FILTER. If pkt_len is 0 we toss packet. If skb->len is smaller
@@ -58,7 +59,7 @@
  * be accepted or -EPERM if the packet should be tossed.
  *
  */
-int sk_filter(struct sock *sk, struct sk_buff *skb)
+int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 {
 	int err;
 	struct sk_filter *filter;
@@ -80,13 +81,13 @@ int sk_filter(struct sock *sk, struct sk_buff *skb)
 	if (filter) {
 		unsigned int pkt_len = SK_RUN_FILTER(filter, skb);
 
-		err = pkt_len ? pskb_trim(skb, pkt_len) : -EPERM;
+		err = pkt_len ? pskb_trim(skb, max(cap, pkt_len)) : -EPERM;
 	}
 	rcu_read_unlock();
 
 	return err;
 }
-EXPORT_SYMBOL(sk_filter);
+EXPORT_SYMBOL(sk_filter_trim_cap);
 
 static u64 __skb_get_pay_offset(u64 ctx, u64 a, u64 x, u64 r4, u64 r5)
 {
@@ -773,6 +774,11 @@ int bpf_check_classic(const struct sock_filter *filter, unsigned int flen)
 		case BPF_ALU | BPF_MOD | BPF_K:
 			/* Check for division by zero */
 			if (ftest->k == 0)
+				return -EINVAL;
+			break;
+		case BPF_ALU | BPF_LSH | BPF_K:
+		case BPF_ALU | BPF_RSH | BPF_K:
+			if (ftest->k >= 32)
 				return -EINVAL;
 			break;
 		case BPF_LD | BPF_MEM:
@@ -1526,9 +1532,13 @@ int sk_get_filter(struct sock *sk, struct sock_filter __user *ubuf,
 		goto out;
 
 	/* We're copying the filter that has been originally attached,
-	 * so no conversion/decode needed anymore.
+	 * so no conversion/decode needed anymore. eBPF programs that
+	 * have no original program cannot be dumped through this.
 	 */
+	ret = -EACCES;
 	fprog = filter->prog->orig_prog;
+	if (!fprog)
+		goto out;
 
 	ret = fprog->len;
 	if (!len)

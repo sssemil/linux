@@ -505,6 +505,24 @@ struct nameidata {
 	char *saved_names[MAX_NESTED_LINKS + 1];
 };
 
+/**
+ * path_connected - Verify that a path->dentry is below path->mnt.mnt_root
+ * @path: nameidate to verify
+ *
+ * Rename can sometimes move a file or directory outside of a bind
+ * mount, path_connected allows those cases to be detected.
+ */
+static bool path_connected(const struct path *path)
+{
+	struct vfsmount *mnt = path->mnt;
+
+	/* Only bind mounts can have disconnected paths */
+	if (mnt->mnt_root == mnt->mnt_sb->s_root)
+		return true;
+
+	return is_subdir(path->dentry, mnt->mnt_root);
+}
+
 /*
  * Path walking has 2 modes, rcu-walk and ref-walk (see
  * Documentation/filesystems/path-lookup.txt).  In situations when we can't
@@ -1194,6 +1212,8 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 				goto failed;
 			nd->path.dentry = parent;
 			nd->seq = seq;
+			if (unlikely(!path_connected(&nd->path)))
+				goto failed;
 			break;
 		}
 		if (!follow_up_rcu(&nd->path))
@@ -1290,7 +1310,7 @@ static void follow_mount(struct path *path)
 	}
 }
 
-static void follow_dotdot(struct nameidata *nd)
+static int follow_dotdot(struct nameidata *nd)
 {
 	if (!nd->root.mnt)
 		set_root(nd);
@@ -1306,6 +1326,10 @@ static void follow_dotdot(struct nameidata *nd)
 			/* rare case of legitimate dget_parent()... */
 			nd->path.dentry = dget_parent(nd->path.dentry);
 			dput(old);
+			if (unlikely(!path_connected(&nd->path))) {
+				path_put(&nd->path);
+				return -ENOENT;
+			}
 			break;
 		}
 		if (!follow_up(&nd->path))
@@ -1313,6 +1337,7 @@ static void follow_dotdot(struct nameidata *nd)
 	}
 	follow_mount(&nd->path);
 	nd->inode = nd->path.dentry->d_inode;
+	return 0;
 }
 
 /*
@@ -1428,8 +1453,6 @@ static int lookup_fast(struct nameidata *nd,
 		negative = d_is_negative(dentry);
 		if (read_seqcount_retry(&dentry->d_seq, seq))
 			return -ECHILD;
-		if (negative)
-			return -ENOENT;
 
 		/*
 		 * This sequence count validates that the parent had no
@@ -1450,6 +1473,12 @@ static int lookup_fast(struct nameidata *nd,
 				goto unlazy;
 			}
 		}
+		/*
+		 * Note: do negative dentry check after revalidation in
+		 * case that drops it.
+		 */
+		if (negative)
+			return -ENOENT;
 		path->mnt = mnt;
 		path->dentry = dentry;
 		if (likely(__follow_mount_rcu(nd, path, inode)))
@@ -1541,7 +1570,7 @@ static inline int handle_dots(struct nameidata *nd, int type)
 			if (follow_dotdot_rcu(nd))
 				return -ECHILD;
 		} else
-			follow_dotdot(nd);
+			return follow_dotdot(nd);
 	}
 	return 0;
 }
@@ -1590,10 +1619,10 @@ static inline int walk_component(struct nameidata *nd, struct path *path,
 		if (err < 0)
 			goto out_err;
 
-		inode = path->dentry->d_inode;
 		err = -ENOENT;
 		if (d_is_negative(path->dentry))
 			goto out_path_put;
+		inode = path->dentry->d_inode;
 	}
 
 	if (should_follow_link(path->dentry, follow)) {
@@ -2290,7 +2319,7 @@ mountpoint_last(struct nameidata *nd, struct path *path)
 	if (unlikely(nd->last_type != LAST_NORM)) {
 		error = handle_dots(nd, nd->last_type);
 		if (error)
-			goto out;
+			return error;
 		dentry = dget(nd->path.dentry);
 		goto done;
 	}
@@ -2519,6 +2548,18 @@ struct dentry *lock_rename(struct dentry *p1, struct dentry *p2)
 		return NULL;
 	}
 
+	/*lint -save -e730*/
+	if (unlikely(p2->d_inode == p1->d_inode)) {
+	/*lint -restore*/
+		printk(KERN_ERR "lock_rename fatal, p1:[%lu, %s], p2[%lu, %s], magic:%lu\n",
+			p1->d_inode->i_ino, p1->d_name.name,
+			p2->d_inode->i_ino, p2->d_name.name,
+			p1->d_inode->i_sb->s_magic);
+		dump_stack();
+		mutex_lock_nested(&p1->d_inode->i_mutex, I_MUTEX_PARENT);
+		return NULL;
+	}
+
 	mutex_lock(&p1->d_inode->i_sb->s_vfs_rename_mutex);
 
 	p = d_ancestor(p2, p1);
@@ -2545,6 +2586,10 @@ void unlock_rename(struct dentry *p1, struct dentry *p2)
 {
 	mutex_unlock(&p1->d_inode->i_mutex);
 	if (p1 != p2) {
+		/*lint -save -e730*/
+		if (unlikely(p2->d_inode == p1->d_inode))
+		/*lint -restore*/
+			return;
 		mutex_unlock(&p2->d_inode->i_mutex);
 		mutex_unlock(&p1->d_inode->i_sb->s_vfs_rename_mutex);
 	}
@@ -2810,22 +2855,10 @@ no_open:
 		dentry = lookup_real(dir, dentry, nd->flags);
 		if (IS_ERR(dentry))
 			return PTR_ERR(dentry);
-
-		if (create_error) {
-			int open_flag = op->open_flag;
-
-			error = create_error;
-			if ((open_flag & O_EXCL)) {
-				if (!dentry->d_inode)
-					goto out;
-			} else if (!dentry->d_inode) {
-				goto out;
-			} else if ((open_flag & O_TRUNC) &&
-				   d_is_reg(dentry)) {
-				goto out;
-			}
-			/* will fail later, go on to get the right error */
-		}
+	}
+	if (create_error && !dentry->d_inode) {
+		error = create_error;
+		goto out;
 	}
 looked_up:
 	path->dentry = dentry;
@@ -3049,6 +3082,7 @@ retry_lookup:
 		path_to_nameidata(path, nd);
 		goto out;
 	}
+	inode = path->dentry->d_inode;
 finish_lookup:
 	/* we _can_ be in RCU mode here */
 	if (should_follow_link(path->dentry, !symlink_ok)) {
@@ -3123,6 +3157,10 @@ opened:
 			goto exit_fput;
 	}
 out:
+	if (unlikely(error > 0)) {
+		WARN_ON(1);
+		error = -EINVAL;
+	}
 	if (got_write)
 		mnt_drop_write(nd->path.mnt);
 	path_put(&save_parent);
@@ -4123,7 +4161,11 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	bool new_is_dir = false;
 	unsigned max_links = new_dir->i_sb->s_max_links;
 
-	if (source == target)
+	/*
+	 * Check source == target.
+	 * On overlayfs need to look at underlying inodes.
+	 */
+	if (vfs_select_inode(old_dentry, 0) == vfs_select_inode(new_dentry, 0))
 		return 0;
 
 	error = may_delete(old_dir, old_dentry, is_dir);

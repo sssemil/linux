@@ -76,6 +76,17 @@
 #include <asm/unaligned.h>
 #include <linux/errqueue.h>
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+#include <net/tcp_crosslayer.h>
+#endif
+
+#ifdef CONFIG_HW_WIFIPRO
+#include <huawei_platform/net/ipv4/wifipro_tcp_monitor.h>
+#endif
+#ifdef CONFIG_HW_WIFI
+#include <huawei_platform/net/ipv4/wifi_tcp_statistics.h>
+#endif
+
 int sysctl_tcp_timestamps __read_mostly = 1;
 int sysctl_tcp_window_scaling __read_mostly = 1;
 int sysctl_tcp_sack __read_mostly = 1;
@@ -89,7 +100,7 @@ int sysctl_tcp_adv_win_scale __read_mostly = 1;
 EXPORT_SYMBOL(sysctl_tcp_adv_win_scale);
 
 /* rfc5961 challenge ack rate limiting */
-int sysctl_tcp_challenge_ack_limit = 100;
+int sysctl_tcp_challenge_ack_limit = 1000;
 
 int sysctl_tcp_stdurg __read_mostly;
 int sysctl_tcp_rfc1337 __read_mostly;
@@ -101,6 +112,7 @@ int sysctl_tcp_thin_dupack __read_mostly;
 int sysctl_tcp_moderate_rcvbuf __read_mostly = 1;
 int sysctl_tcp_early_retrans __read_mostly = 3;
 int sysctl_tcp_invalid_ratelimit __read_mostly = HZ/2;
+int sysctl_tcp_default_init_rwnd __read_mostly = TCP_INIT_CWND * 2;
 
 #define FLAG_DATA		0x01 /* Incoming frame contained data.		*/
 #define FLAG_WIN_UPDATE		0x02 /* Incoming ACK was a window update.	*/
@@ -123,6 +135,18 @@ int sysctl_tcp_invalid_ratelimit __read_mostly = HZ/2;
 
 #define TCP_REMNANT (TCP_FLAG_FIN|TCP_FLAG_URG|TCP_FLAG_SYN|TCP_FLAG_PSH)
 #define TCP_HP_BITS (~(TCP_RESERVED_BITS|TCP_FLAG_PSH))
+
+#ifdef CONFIG_CHR_NETLINK_MODULE
+extern void notify_chr_thread_to_send_msg(unsigned int dst_addr, unsigned int src_addr);
+extern void notify_chr_thread_to_update_rtt(u32 rtt);
+#endif
+
+#ifdef CONFIG_HW_WIFI
+#define HW_TCP_TIMESTAMP_ERR_THRESHOLD    (1)
+extern void hw_dhd_check_and_disable_timestamps(void);
+extern bool  hw_timestamps_get_wifi_connect_status(void);
+static void hw_tcp_check_and_disable_timestamps(void);
+#endif
 
 /* Adapt the MSS value used to make delayed ack decision to the
  * real world.
@@ -702,6 +726,17 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 	 * does not matter how to _calculate_ it. Seems, it was trap
 	 * that VJ failed to avoid. 8)
 	 */
+#ifdef CONFIG_HW_WIFI
+	wifi_update_rtt(mrtt_us, sk);
+#endif
+
+#ifdef CONFIG_HW_WIFIPRO
+	if ((is_wifipro_on || wifi_is_on()) && mrtt_us != 0) {
+		unsigned int rtt_jiffies = usecs_to_jiffies(mrtt_us);
+		wifipro_update_rtt(rtt_jiffies<<3, sk);
+	}
+#endif
+
 	if (srtt != 0) {
 		m -= (srtt >> 3);	/* m is now error in rtt est */
 		srtt += m;		/* rtt = 7/8 rtt + 1/8 new */
@@ -1955,7 +1990,9 @@ void tcp_enter_loss(struct sock *sk)
 		tp->fackets_out = 0;
 	}
 	tcp_clear_all_retrans_hints(tp);
-
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+	ASPEN_INC_TO_REXMIT_CNTS(sk);
+#endif
 	tcp_for_write_queue(skb, sk) {
 		if (skb == tcp_send_head(sk))
 			break;
@@ -2443,6 +2480,9 @@ static bool tcp_try_undo_recovery(struct sock *sk)
 			tp->retrans_stamp = 0;
 		return true;
 	}
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	aspen_tcp_try_undo_modem_drop(sk, FROM_RECOVERY);
+#endif
 	tcp_set_ca_state(sk, TCP_CA_Open);
 	return false;
 }
@@ -2466,6 +2506,9 @@ static bool tcp_try_undo_loss(struct sock *sk, bool frto_undo)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	aspen_tcp_try_undo_modem_drop(sk, FROM_LOSS);
+#endif
 	if (frto_undo || tcp_may_undo(tp)) {
 		tcp_undo_cwnd_reduction(sk, true);
 
@@ -2514,6 +2557,9 @@ static void tcp_cwnd_reduction(struct sock *sk, const int prior_unsacked,
 	int delta = tp->snd_ssthresh - tcp_packets_in_flight(tp);
 	int newly_acked_sacked = prior_unsacked -
 				 (tp->packets_out - tp->sacked_out);
+
+	if (newly_acked_sacked <= 0 || WARN_ON_ONCE(!tp->prior_cwnd))
+		return;
 
 	tp->prr_delivered += newly_acked_sacked;
 	if (tcp_packets_in_flight(tp) > tp->snd_ssthresh) {
@@ -2687,6 +2733,10 @@ static void tcp_enter_recovery(struct sock *sk, bool ece_ack)
 			tp->prior_ssthresh = tcp_current_ssthresh(sk);
 		tcp_init_cwnd_reduction(sk);
 	}
+
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+	ASPEN_INC_FAST_REXMIT_CNTS(sk);
+#endif
 	tcp_set_ca_state(sk, TCP_CA_Recovery);
 }
 
@@ -2835,6 +2885,12 @@ static void tcp_fastretrans_alert(struct sock *sk, const int acked,
 				return;
 			tcp_end_cwnd_reduction(sk);
 			break;
+
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+		case TCP_CA_Modem_Drop:
+			tcp_set_ca_state(sk, TCP_CA_Open);
+			break;
+#endif
 		}
 	}
 
@@ -2856,6 +2912,13 @@ static void tcp_fastretrans_alert(struct sock *sk, const int acked,
 			return;
 		}
 		break;
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	case TCP_CA_Modem_Drop:
+		if (flag & FLAG_SND_UNA_ADVANCED)
+			do_lost = tcp_is_reno(tp) ||
+				  tcp_fackets_out(tp) > tp->reordering;
+		break;
+#endif
 	case TCP_CA_Loss:
 		tcp_process_loss(sk, flag, is_dupack);
 		if (icsk->icsk_ca_state != TCP_CA_Open)
@@ -2895,7 +2958,12 @@ static void tcp_fastretrans_alert(struct sock *sk, const int acked,
 
 	if (do_lost)
 		tcp_update_scoreboard(sk, fast_rexmit);
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	if (icsk->icsk_ca_state != TCP_CA_Modem_Drop)
+		tcp_cwnd_reduction(sk, prior_unsacked, fast_rexmit);
+#else
 	tcp_cwnd_reduction(sk, prior_unsacked, fast_rexmit);
+#endif
 	tcp_xmit_retransmit_queue(sk);
 }
 
@@ -2928,6 +2996,9 @@ static inline bool tcp_ack_update_rtt(struct sock *sk, const int flag,
 	if (seq_rtt_us < 0)
 		return false;
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+	ASPEN_SET_RTT_US(sk);
+#endif
 	tcp_rtt_estimator(sk, seq_rtt_us);
 	tcp_set_rto(sk);
 
@@ -3009,7 +3080,12 @@ void tcp_resume_early_retransmit(struct sock *sk)
 	if (!tp->do_early_retrans)
 		return;
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	if (inet_csk(sk)->icsk_ca_state != TCP_CA_Modem_Drop)
+		tcp_enter_recovery(sk, false);
+#else
 	tcp_enter_recovery(sk, false);
+#endif
 	tcp_update_scoreboard(sk, 1);
 	tcp_xmit_retransmit_queue(sk);
 }
@@ -3155,6 +3231,21 @@ static int tcp_clean_rtx_queue(struct sock *sk, int prior_fackets,
 		seq_rtt_us = skb_mstamp_us_delta(&now, &first_ackt);
 		ca_seq_rtt_us = skb_mstamp_us_delta(&now, &last_ackt);
 	}
+
+#ifdef CONFIG_CHR_NETLINK_MODULE
+	if (flag & FLAG_SYN_ACKED) {
+
+		tp->first_data_flag = true;
+		tp->data_net_flag = false;
+	}
+
+	if (flag & FLAG_DATA_ACKED && tp->first_data_flag &&
+		tp->data_net_flag) {
+
+		notify_chr_thread_to_update_rtt((u32)seq_rtt_us);
+		tp->first_data_flag = false;
+	}
+#endif
 
 	rtt_update = tcp_ack_update_rtt(sk, flag, seq_rtt_us, sack_rtt_us);
 
@@ -3343,6 +3434,23 @@ static int tcp_ack_update_window(struct sock *sk, const struct sk_buff *skb, u32
 	return flag;
 }
 
+static bool __tcp_oow_rate_limited(struct net *net, int mib_idx,
+				   u32 *last_oow_ack_time)
+{
+	if (*last_oow_ack_time) {
+		s32 elapsed = (s32)(tcp_time_stamp - *last_oow_ack_time);
+
+		if (0 <= elapsed && elapsed < sysctl_tcp_invalid_ratelimit) {
+			NET_INC_STATS(net, mib_idx);
+			return true;	/* rate-limited: don't send yet! */
+		}
+	}
+
+	*last_oow_ack_time = tcp_time_stamp;
+
+	return false;	/* not rate-limited: go ahead, send dupack now! */
+}
+
 /* Return true if we're currently rate-limiting out-of-window ACKs and
  * thus shouldn't send a dupack right now. We rate-limit dupacks in
  * response to out-of-window SYNs or ACKs to mitigate ACK loops or DoS
@@ -3356,21 +3464,9 @@ bool tcp_oow_rate_limited(struct net *net, const struct sk_buff *skb,
 	/* Data packets without SYNs are not likely part of an ACK loop. */
 	if ((TCP_SKB_CB(skb)->seq != TCP_SKB_CB(skb)->end_seq) &&
 	    !tcp_hdr(skb)->syn)
-		goto not_rate_limited;
+		return false;
 
-	if (*last_oow_ack_time) {
-		s32 elapsed = (s32)(tcp_time_stamp - *last_oow_ack_time);
-
-		if (0 <= elapsed && elapsed < sysctl_tcp_invalid_ratelimit) {
-			NET_INC_STATS_BH(net, mib_idx);
-			return true;	/* rate-limited: don't send yet! */
-		}
-	}
-
-	*last_oow_ack_time = tcp_time_stamp;
-
-not_rate_limited:
-	return false;	/* not rate-limited: go ahead, send dupack now! */
+	return __tcp_oow_rate_limited(net, mib_idx, last_oow_ack_time);
 }
 
 /* RFC 5961 7 [ACK Throttling] */
@@ -3380,21 +3476,26 @@ static void tcp_send_challenge_ack(struct sock *sk, const struct sk_buff *skb)
 	static u32 challenge_timestamp;
 	static unsigned int challenge_count;
 	struct tcp_sock *tp = tcp_sk(sk);
-	u32 now;
+	u32 count, now;
 
 	/* First check our per-socket dupack rate limit. */
-	if (tcp_oow_rate_limited(sock_net(sk), skb,
-				 LINUX_MIB_TCPACKSKIPPEDCHALLENGE,
-				 &tp->last_oow_ack_time))
+	if (__tcp_oow_rate_limited(sock_net(sk),
+				   LINUX_MIB_TCPACKSKIPPEDCHALLENGE,
+				   &tp->last_oow_ack_time))
 		return;
 
-	/* Then check the check host-wide RFC 5961 rate limit. */
+	/* Then check host-wide RFC 5961 rate limit. */
 	now = jiffies / HZ;
 	if (now != challenge_timestamp) {
+		u32 half = (sysctl_tcp_challenge_ack_limit + 1) >> 1;
+
 		challenge_timestamp = now;
-		challenge_count = 0;
+		WRITE_ONCE(challenge_count, half +
+			   prandom_u32_max(sysctl_tcp_challenge_ack_limit));
 	}
-	if (++challenge_count <= sysctl_tcp_challenge_ack_limit) {
+	count = READ_ONCE(challenge_count);
+	if (count > 0) {
+		WRITE_ONCE(challenge_count, count - 1);
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPCHALLENGEACK);
 		tcp_send_ack(sk);
 	}
@@ -4081,6 +4182,17 @@ static void tcp_send_dupack(struct sock *sk, const struct sk_buff *skb)
 		}
 	}
 
+#ifdef CONFIG_HW_WIFI
+	if (tp->dack_rcv_nxt == tp->rcv_nxt) {
+		tp->dack_seq_num++;
+		if (tp->dack_seq_num == 3)
+			wifi_IncrRcvDupAcksSegs(sk, 1);
+
+	} else {
+		tp->dack_rcv_nxt  = tp->rcv_nxt;
+		tp->dack_seq_num = 0;
+	}
+#endif
 	tcp_send_ack(sk);
 }
 
@@ -4438,19 +4550,34 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 int tcp_send_rcvq(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	struct sk_buff *skb;
+	int err = -ENOMEM;
+	int data_len = 0;
 	bool fragstolen;
 
 	if (size == 0)
 		return 0;
 
-	skb = alloc_skb(size, sk->sk_allocation);
+	if (size > PAGE_SIZE) {
+		int npages = min_t(size_t, size >> PAGE_SHIFT, MAX_SKB_FRAGS);
+
+		data_len = npages << PAGE_SHIFT;
+		size = data_len + (size & ~PAGE_MASK);
+	}
+	skb = alloc_skb_with_frags(size - data_len, data_len,
+				   PAGE_ALLOC_COSTLY_ORDER,
+				   &err, sk->sk_allocation);
 	if (!skb)
 		goto err;
+
+	skb_put(skb, size - data_len);
+	skb->data_len = data_len;
+	skb->len = size;
 
 	if (tcp_try_rmem_schedule(sk, skb, skb->truesize))
 		goto err_free;
 
-	if (memcpy_from_msg(skb_put(skb, size), msg, size))
+	err = skb_copy_datagram_from_iter(skb, 0, &msg->msg_iter, size);
+	if (err)
 		goto err_free;
 
 	TCP_SKB_CB(skb)->seq = tcp_sk(sk)->rcv_nxt;
@@ -4466,7 +4593,8 @@ int tcp_send_rcvq(struct sock *sk, struct msghdr *msg, size_t size)
 err_free:
 	kfree_skb(skb);
 err:
-	return -ENOMEM;
+	return err;
+
 }
 
 static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
@@ -5185,6 +5313,11 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 
 	tp->rx_opt.saw_tstamp = 0;
 
+#ifdef CONFIG_HUAWEI_BASTET
+	bastet_delay_sock_sync_notify(sk);
+	BST_FG_HOOK_DL_STUB(sk, skb, tp->tcp_header_len);
+#endif
+
 	/*	pred_flags is 0xS?10 << 16 + snd_wnd
 	 *	if header_prediction is to be made
 	 *	'S' will always be tp->tcp_header_len >> 2
@@ -5450,6 +5583,37 @@ static bool tcp_rcv_fastopen_synack(struct sock *sk, struct sk_buff *synack,
 	return false;
 }
 
+#ifdef CONFIG_HW_WIFI
+/* "sysctl_tcp_timestamps" is linked to "/proc/sys/net/ipv4/tcp_timestamps".
+ * default value of "sysctl_tcp_timestamps" is 1.
+ * here will try to disable tcp_timestamps(set to 0) if timestamp error over 5 times
+ * it will be done in dhd driver, because only try it in wlan network.
+ * WARNING: this function only should be called when timestamp err happened.
+ * WARNING: if any more changes for sysctl_tcp_timestamps, please check whole logic.
+ */
+static void hw_tcp_check_and_disable_timestamps(void)
+{
+	static int tcp_ts_err;
+	static int last_timestamps;
+
+	if (0 == last_timestamps && 1 == sysctl_tcp_timestamps) {
+		pr_err("last_ts init or tcp_timestamps resotre to enabled, clear err count.\n");
+		tcp_ts_err = 0;
+	}
+	if (sysctl_tcp_timestamps && (++tcp_ts_err > HW_TCP_TIMESTAMP_ERR_THRESHOLD)) {
+		pr_err("TCP timestamp error, check network interface and try to disable ts.\n");
+#ifdef CONFIG_BCMDHD
+		hw_dhd_check_and_disable_timestamps();
+#endif
+		if(hw_timestamps_get_wifi_connect_status() && sysctl_tcp_timestamps){
+			sysctl_tcp_timestamps = false;
+		}
+		tcp_ts_err = 0;
+	}
+	last_timestamps = sysctl_tcp_timestamps;
+}
+#endif
+
 static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 					 const struct tcphdr *th, unsigned int len)
 {
@@ -5457,6 +5621,9 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_fastopen_cookie foc = { .len = -1 };
 	int saved_clamp = tp->rx_opt.mss_clamp;
+#ifdef CONFIG_CHR_NETLINK_MODULE
+	struct inet_sock *inet = inet_sk(sk);
+#endif
 
 	tcp_parse_options(skb, &tp->rx_opt, 0, &foc);
 	if (tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr)
@@ -5478,6 +5645,10 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		if (tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr &&
 		    !between(tp->rx_opt.rcv_tsecr, tp->retrans_stamp,
 			     tcp_time_stamp)) {
+#ifdef CONFIG_HW_WIFI
+			pr_err("tcp timestamp error, to check and disable tcp_timestamps.\n");
+			hw_tcp_check_and_disable_timestamps(); /* tcp timestamps workround */
+#endif
 			NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_PAWSACTIVEREJECTED);
 			goto reset_and_undo;
 		}
@@ -5513,6 +5684,14 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		 */
 
 		tcp_ecn_rcv_synack(tp, th);
+#ifdef CONFIG_CHR_NETLINK_MODULE
+		if (icsk->icsk_retransmits > 2) {
+			SOCK_DEBUG(sk, "tcp_rcv_synsent_state_process:icsk_retransmits=%d,notify_chr_thread_to_send_msg()!\n", icsk->icsk_retransmits);
+			notify_chr_thread_to_send_msg(inet->inet_daddr, inet->inet_saddr);
+		} else {
+			SOCK_DEBUG(sk, "tcp_rcv_synsent_state_process:icsk_retransmits=%d\n", icsk->icsk_retransmits);
+		}
+#endif
 
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
 		tcp_ack(sk, skb, FLAG_SLOWPATH);
@@ -5622,6 +5801,7 @@ discard:
 		}
 
 		tp->rcv_nxt = TCP_SKB_CB(skb)->seq + 1;
+		tp->copied_seq = tp->rcv_nxt;
 		tp->rcv_wup = TCP_SKB_CB(skb)->seq + 1;
 
 		/* RFC1323: The window in SYN & SYN/ACK segments is

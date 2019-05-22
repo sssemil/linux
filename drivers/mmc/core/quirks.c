@@ -44,6 +44,7 @@ static void add_quirk_for_sdio_devices(struct mmc_card *card, int data)
 		card->quirks |= data;
 }
 
+/*lint -save -e501*/
 static const struct mmc_fixup mmc_fixup_methods[] = {
 	/* by default sdio devices are considered CLK_GATING broken */
 	/* good cards will be whitelisted as they are tested */
@@ -97,3 +98,4 @@ void mmc_fixup_device(struct mmc_card *card, const struct mmc_fixup *table)
 	}
 }
 EXPORT_SYMBOL(mmc_fixup_device);
+/*lint -restore*/

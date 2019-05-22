@@ -64,6 +64,10 @@ static unsigned int ipv6_defrag(const struct nf_hook_ops *ops,
 		return NF_ACCEPT;
 #endif
 
+	if (skb->dev)
+		if (!strncmp(skb->dev->name, "rmnet_ims1", (size_t)IFNAMSIZ))
+			return NF_ACCEPT;
+
 	reasm = nf_ct_frag6_gather(skb, nf_ct6_defrag_user(ops->hooknum, skb));
 	/* queued */
 	if (reasm == NULL)

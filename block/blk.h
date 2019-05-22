@@ -78,11 +78,39 @@ bool bio_attempt_front_merge(struct request_queue *q, struct request *req,
 bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 			    struct bio *bio);
 bool blk_attempt_plug_merge(struct request_queue *q, struct bio *bio,
-			    unsigned int *request_count);
+			    unsigned int *request_count,
+			    struct request **same_queue_rq);
 
 void blk_account_io_start(struct request *req, bool new_io);
 void blk_account_io_completion(struct request *req, unsigned int bytes);
 void blk_account_io_done(struct request *req);
+#ifdef CONFIG_HISI_BLK_CORE
+#ifdef CONFIG_HISI_BLK_FLUSH_REDUCE
+void blk_queue_async_flush_init(struct request_queue *q);
+void blk_flush_reduced_queue_register(struct request_queue *q);
+void blk_flush_reduced_queue_unregister(struct request_queue *q);
+bool flush_sync_dispatch(struct request_queue *q, struct bio *bio);
+#endif
+void blk_idle_count(struct request_queue *q);
+void blk_busy_count(struct request_queue *q);
+void blk_bio_in_count_set(struct request_queue *q, struct bio *bio);
+bool blk_request_bio_in_count_check(struct request_queue *q, struct request *rq);
+void blk_execute_request_in_count_check(struct request_queue *q, struct request *rq,rq_end_io_fn *done);
+void blk_bio_endio_in_count_check(struct bio *bio);
+struct blk_lld_func* blk_get_lld(struct request_queue *q);
+struct request_queue* blk_get_queue_by_lld(struct blk_lld_func* lld);
+char* io_type_parse(unsigned long io_flag);
+void blk_bkops_init(struct blk_bkops_func* bkops);
+int blk_busy_idle_event_register(struct request_queue *q, struct blk_busy_idle_nb* notify_nb);
+int blk_busy_idle_event_unregister(struct request_queue *q, struct blk_busy_idle_nb* notify_nb);
+void hisi_blk_allocated_queue_init(struct request_queue *q);
+void hisi_blk_allocated_tags_init(struct blk_queue_tag *tags);
+void blk_add_queue_tags(struct blk_queue_tag *tags,struct request_queue *q);
+void hisi_blk_mq_allocated_tagset_init(struct blk_mq_tag_set *set);
+void hisi_blk_queue_register(struct request_queue *q, struct gendisk *disk);
+int __init hisi_blk_bkops_init(void);
+int __init hisi_blk_dev_init(void);
+#endif
 
 /*
  * Internal atomic flags for request handling
@@ -180,7 +208,7 @@ static inline int blk_should_fake_timeout(struct request_queue *q)
 
 int ll_back_merge_fn(struct request_queue *q, struct request *req,
 		     struct bio *bio);
-int ll_front_merge_fn(struct request_queue *q, struct request *req, 
+int ll_front_merge_fn(struct request_queue *q, struct request *req,
 		      struct bio *bio);
 int attempt_back_merge(struct request_queue *q, struct request *rq);
 int attempt_front_merge(struct request_queue *q, struct request *rq);

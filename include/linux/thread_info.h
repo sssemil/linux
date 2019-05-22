@@ -55,11 +55,18 @@ extern long do_no_restart_syscall(struct restart_block *parm);
 
 #ifdef __KERNEL__
 
-#ifdef CONFIG_DEBUG_STACK_USAGE
-# define THREADINFO_GFP		(GFP_KERNEL | __GFP_NOTRACK | __GFP_ZERO)
+#ifdef CONFIG_HISI_THREADINFO_NORMAL_ZONE
+#define THREADINFO_GFP_NORMAL   __GFP_NORMAL
 #else
-# define THREADINFO_GFP		(GFP_KERNEL | __GFP_NOTRACK)
+#define THREADINFO_GFP_NORMAL   0x0u
 #endif
+
+#ifdef CONFIG_DEBUG_STACK_USAGE
+# define THREADINFO_GFP		(GFP_KERNEL | __GFP_NOTRACK | __GFP_ZERO | THREADINFO_GFP_NORMAL)
+#else
+# define THREADINFO_GFP		(GFP_KERNEL | __GFP_NOTRACK | THREADINFO_GFP_NORMAL)
+#endif
+
 
 /*
  * flag set/clear/test wrappers
@@ -144,6 +151,30 @@ static inline bool test_and_clear_restore_sigmask(void)
 #ifndef HAVE_SET_RESTORE_SIGMASK
 #error "no set_restore_sigmask() provided and default one won't work"
 #endif
+
+#ifndef CONFIG_HAVE_ARCH_WITHIN_STACK_FRAMES
+static inline int arch_within_stack_frames(const void * const stack,
+					   const void * const stackend,
+					   const void *obj, unsigned long len)
+{
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_HARDENED_USERCOPY
+extern void __check_object_size(const void *ptr, unsigned long n,
+					bool to_user);
+
+static __always_inline void check_object_size(const void *ptr, unsigned long n,
+					      bool to_user)
+{
+	__check_object_size(ptr, n, to_user);
+}
+#else
+static inline void check_object_size(const void *ptr, unsigned long n,
+				     bool to_user)
+{ }
+#endif /* CONFIG_HARDENED_USERCOPY */
 
 #endif	/* __KERNEL__ */
 

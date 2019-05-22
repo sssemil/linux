@@ -20,6 +20,9 @@
 #include <linux/slab.h>
 #ifdef CONFIG_OF_GPIO
 #include <linux/of_platform.h>
+#ifdef CONFIG_GPIO_PCA953X_HISI
+#include <linux/of_gpio.h>
+#endif
 #endif
 
 #define PCA953X_INPUT		0
@@ -75,7 +78,7 @@ MODULE_DEVICE_TABLE(i2c, pca953x_id);
 #define MAX_BANK 5
 #define BANK_SZ 8
 
-#define NBANK(chip) (chip->gpio_chip.ngpio / BANK_SZ)
+#define NBANK(chip) DIV_ROUND_UP(chip->gpio_chip.ngpio, BANK_SZ)
 
 struct pca953x_chip {
 	unsigned gpio_start;
@@ -438,6 +441,10 @@ static struct irq_chip pca953x_irq_chip = {
 	.name			= "pca953x",
 	.irq_mask		= pca953x_irq_mask,
 	.irq_unmask		= pca953x_irq_unmask,
+#ifdef CONFIG_GPIO_PCA953X_HISI
+	.irq_disable		= pca953x_irq_mask,
+	.irq_enable		= pca953x_irq_unmask,
+#endif
 	.irq_bus_lock		= pca953x_irq_bus_lock,
 	.irq_bus_sync_unlock	= pca953x_irq_bus_sync_unlock,
 	.irq_set_type		= pca953x_irq_set_type,
@@ -510,7 +517,7 @@ static irqreturn_t pca953x_irq_handler(int irq, void *devid)
 		}
 	}
 
-	return (nhandled > 0) ? IRQ_HANDLED : IRQ_NONE;
+	return (nhandled > 0) ? IRQ_HANDLED : IRQ_NONE;/*[false alarm]:return */
 }
 
 static int pca953x_irq_setup(struct pca953x_chip *chip,
@@ -548,8 +555,8 @@ static int pca953x_irq_setup(struct pca953x_chip *chip,
 					client->irq,
 					   NULL,
 					   pca953x_irq_handler,
-					   IRQF_TRIGGER_LOW | IRQF_ONESHOT |
-						   IRQF_SHARED,
+					   IRQF_TRIGGER_FALLING | IRQF_ONESHOT |
+						   IRQF_NO_SUSPEND,
 					   dev_name(&client->dev), chip);
 		if (ret) {
 			dev_err(&client->dev, "failed to request irq %d\n",
@@ -586,6 +593,48 @@ static int pca953x_irq_setup(struct pca953x_chip *chip,
 }
 #endif
 
+#ifdef CONFIG_GPIO_PCA953X_HISI
+/*
+ * Handlers for alternative sources of platform_data
+ */
+#ifdef CONFIG_OF_GPIO
+/*
+ * Translate OpenFirmware node properties into platform_data
+ * WARNING: This is DEPRECATED and will be removed eventually!
+ */
+static void
+pca953x_get_alt_pdata(struct i2c_client *client, int *gpio_base, u32 *invert)
+{
+	struct device_node *node;
+	const __be32 *val;
+	int size;
+
+	node = client->dev.of_node;
+	if (node == NULL)
+		return;
+
+	*gpio_base = -1;
+	val = of_get_property(node, "linux,gpio-base", &size);
+	if (val) {
+		if (size != sizeof(*val))
+			dev_warn(&client->dev, "%s: wrong linux,gpio-base\n",
+				 node->full_name);
+		else
+			*gpio_base = be32_to_cpup(val);
+	}
+
+	val = of_get_property(node, "polarity", NULL);
+	if (val)
+		*invert = *val;
+}
+#else
+static void
+pca953x_get_alt_pdata(struct i2c_client *client, int *gpio_base, u32 *invert)
+{
+	*gpio_base = -1;
+}
+#endif
+#endif
 static int device_pca953x_init(struct pca953x_chip *chip, u32 invert)
 {
 	int ret;
@@ -660,8 +709,35 @@ static int pca953x_probe(struct i2c_client *client,
 		invert = pdata->invert;
 		chip->names = pdata->names;
 	} else {
+#ifdef CONFIG_GPIO_PCA953X_HISI
+		pca953x_get_alt_pdata(client, &chip->gpio_start, &invert);
+#ifdef CONFIG_OF_GPIO
+		/* If I2C node has no interrupts property, disable GPIO interrupts */
+		if (of_find_property(client->dev.of_node, "interrupts", NULL) == NULL) {
+			irq_base = -1;
+		} else {
+			ret = of_get_gpio(client->dev.of_node, 0);
+			if (ret < 0) {
+				dev_err(&client->dev, "could not get gpio, %d\n", ret);
+				return ret;
+			}
+
+			ret = devm_gpio_request_one(&client->dev,
+				ret,
+				GPIOF_IN,
+				dev_name(&client->dev));
+			if (ret) {
+				dev_err(&client->dev, "could not request gpio, %d\n", ret);
+				return ret;
+			}
+
+			client->irq = gpio_to_irq(ret);
+		}
+#endif
+#else
 		chip->gpio_start = -1;
 		irq_base = 0;
+#endif
 	}
 
 	chip->client = client;

@@ -38,6 +38,7 @@
 #include <linux/sched/rt.h>
 #include <linux/mm_inline.h>
 #include <trace/events/writeback.h>
+#include <linux/blk-cgroup.h>
 
 #include "internal.h"
 
@@ -396,11 +397,11 @@ static unsigned long wp_next_time(unsigned long cur_time)
  * Increment the BDI's writeout completion count and the global writeout
  * completion count. Called from test_clear_page_writeback().
  */
-static inline void __bdi_writeout_inc(struct backing_dev_info *bdi)
+static inline void __wb_writeout_inc(struct bdi_writeback *wb)
 {
-	__inc_bdi_stat(bdi, BDI_WRITTEN);
-	__fprop_inc_percpu_max(&writeout_completions, &bdi->completions,
-			       bdi->max_prop_frac);
+	__inc_wb_stat(wb, WB_WRITTEN);
+	__fprop_inc_percpu_max(&writeout_completions, &wb->bdi->completions,
+			       wb->bdi->max_prop_frac);
 	/* First event after period switching was turned off? */
 	if (!unlikely(writeout_period_time)) {
 		/*
@@ -414,15 +415,15 @@ static inline void __bdi_writeout_inc(struct backing_dev_info *bdi)
 	}
 }
 
-void bdi_writeout_inc(struct backing_dev_info *bdi)
+void wb_writeout_inc(struct bdi_writeback *wb)
 {
 	unsigned long flags;
 
 	local_irq_save(flags);
-	__bdi_writeout_inc(bdi);
+	__wb_writeout_inc(wb);
 	local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(bdi_writeout_inc);
+EXPORT_SYMBOL_GPL(wb_writeout_inc);
 
 /*
  * Obtain an accurate fraction of the BDI's portion.
@@ -1015,11 +1016,6 @@ static void bdi_update_dirty_ratelimit(struct backing_dev_info *bdi,
 	 */
 	balanced_dirty_ratelimit = div_u64((u64)task_ratelimit * write_bw,
 					   dirty_rate | 1);
-	/*
-	 * balanced_dirty_ratelimit ~= (write_bw / N) <= write_bw
-	 */
-	if (unlikely(balanced_dirty_ratelimit > write_bw))
-		balanced_dirty_ratelimit = write_bw;
 
 	/*
 	 * We could safely do this and return immediately:
@@ -1130,8 +1126,8 @@ void __bdi_update_bandwidth(struct backing_dev_info *bdi,
 	if (elapsed < BANDWIDTH_INTERVAL)
 		return;
 
-	dirtied = percpu_counter_read(&bdi->bdi_stat[BDI_DIRTIED]);
-	written = percpu_counter_read(&bdi->bdi_stat[BDI_WRITTEN]);
+	dirtied = percpu_counter_read(&bdi->wb.stat[WB_DIRTIED]);
+	written = percpu_counter_read(&bdi->wb.stat[WB_WRITTEN]);
 
 	/*
 	 * Skip quiet periods when disk bandwidth is under-utilized.
@@ -1288,7 +1284,8 @@ static inline void bdi_dirty_limits(struct backing_dev_info *bdi,
 				    unsigned long *bdi_thresh,
 				    unsigned long *bdi_bg_thresh)
 {
-	unsigned long bdi_reclaimable;
+	struct bdi_writeback *wb = &bdi->wb;
+	unsigned long wb_reclaimable;
 
 	/*
 	 * bdi_thresh is not treated as some limiting factor as
@@ -1320,14 +1317,12 @@ static inline void bdi_dirty_limits(struct backing_dev_info *bdi,
 	 * actually dirty; with m+n sitting in the percpu
 	 * deltas.
 	 */
-	if (*bdi_thresh < 2 * bdi_stat_error(bdi)) {
-		bdi_reclaimable = bdi_stat_sum(bdi, BDI_RECLAIMABLE);
-		*bdi_dirty = bdi_reclaimable +
-			bdi_stat_sum(bdi, BDI_WRITEBACK);
+	if (*bdi_thresh < 2 * wb_stat_error(wb)) {
+		wb_reclaimable = wb_stat_sum(wb, WB_RECLAIMABLE);
+		*bdi_dirty = wb_reclaimable + wb_stat_sum(wb, WB_WRITEBACK);
 	} else {
-		bdi_reclaimable = bdi_stat(bdi, BDI_RECLAIMABLE);
-		*bdi_dirty = bdi_reclaimable +
-			bdi_stat(bdi, BDI_WRITEBACK);
+		wb_reclaimable = wb_stat(wb, WB_RECLAIMABLE);
+		*bdi_dirty = wb_reclaimable + wb_stat(wb, WB_WRITEBACK);
 	}
 }
 
@@ -1355,6 +1350,7 @@ static void balance_dirty_pages(struct address_space *mapping,
 	unsigned long dirty_ratelimit;
 	unsigned long pos_ratio;
 	struct backing_dev_info *bdi = inode_to_bdi(mapping->host);
+	struct bdi_writeback *wb = &bdi->wb;
 	bool strictlimit = bdi->capabilities & BDI_CAP_STRICTLIMIT;
 	unsigned long start_time = jiffies;
 
@@ -1365,7 +1361,21 @@ static void balance_dirty_pages(struct address_space *mapping,
 		unsigned long uninitialized_var(bdi_dirty);
 		unsigned long dirty;
 		unsigned long bg_thresh;
+#ifdef CONFIG_BLK_DEV_THROTTLING
+		struct blkcg_gq *blkg;
+		unsigned int weight;
 
+		/*lint -save -e730*/
+		if (unlikely(!mapping->host || !mapping->host->i_sb ||
+			     !mapping->host->i_sb->s_bdev))
+		/*lint -restore*/
+			blkg = NULL;
+		else
+			blkg = task_blkg_get(current,
+					     mapping->host->i_sb->s_bdev);
+
+		task_blkg_inc_writer(blkg);
+#endif
 		/*
 		 * Unstable writes are a feature of certain networked
 		 * filesystems (i.e. NFS) in which data may have been
@@ -1404,6 +1414,10 @@ static void balance_dirty_pages(struct address_space *mapping,
 			current->nr_dirtied = 0;
 			current->nr_dirtied_pause =
 				dirty_poll_interval(dirty, thresh);
+#ifdef CONFIG_BLK_DEV_THROTTLING
+			task_blkg_dec_writer(blkg);
+			task_blkg_put(blkg);
+#endif
 			break;
 		}
 
@@ -1429,6 +1443,14 @@ static void balance_dirty_pages(struct address_space *mapping,
 					       bdi_thresh, bdi_dirty);
 		task_ratelimit = ((u64)dirty_ratelimit * pos_ratio) >>
 							RATELIMIT_CALC_SHIFT;
+
+#ifdef CONFIG_BLK_DEV_THROTTLING
+		weight = blkcg_weight(blkg);
+		if (weight != BLKIO_WEIGHT_DEFAULT)
+			task_ratelimit = (u64)task_ratelimit * weight /
+					BLKIO_WEIGHT_DEFAULT;
+#endif
+
 		max_pause = bdi_max_pause(bdi, bdi_dirty);
 		min_pause = bdi_min_pause(bdi, max_pause,
 					  task_ratelimit, dirty_ratelimit,
@@ -1471,6 +1493,10 @@ static void balance_dirty_pages(struct address_space *mapping,
 				current->nr_dirtied = 0;
 			} else if (current->nr_dirtied_pause <= pages_dirtied)
 				current->nr_dirtied_pause += pages_dirtied;
+#ifdef CONFIG_BLK_DEV_THROTTLING
+			task_blkg_dec_writer(blkg);
+			task_blkg_put(blkg);
+#endif
 			break;
 		}
 		if (unlikely(pause > max_pause)) {
@@ -1493,12 +1519,18 @@ pause:
 					  pause,
 					  start_time);
 		__set_current_state(TASK_KILLABLE);
+		atomic_inc(&wb->dirty_sleeping);
 		io_schedule_timeout(pause);
+		atomic_dec(&wb->dirty_sleeping);
 
 		current->dirty_paused_when = now + pause;
 		current->nr_dirtied = 0;
 		current->nr_dirtied_pause = nr_dirtied_pause;
 
+#ifdef CONFIG_BLK_DEV_THROTTLING
+		task_blkg_dec_writer(blkg);
+		task_blkg_put(blkg);
+#endif
 		/*
 		 * This is typically equal to (nr_dirty < dirty_thresh) and can
 		 * also keep "1000+ dd on a slow USB stick" under control.
@@ -1514,9 +1546,9 @@ pause:
 		 * In theory 1 page is enough to keep the comsumer-producer
 		 * pipe going: the flusher cleans 1 page => the task dirties 1
 		 * more page. However bdi_dirty has accounting errors.  So use
-		 * the larger and more IO friendly bdi_stat_error.
+		 * the larger and more IO friendly wb_stat_error.
 		 */
-		if (bdi_dirty <= bdi_stat_error(bdi))
+		if (bdi_dirty <= wb_stat_error(&bdi->wb))
 			break;
 
 		if (fatal_signal_pending(current))
@@ -2090,19 +2122,41 @@ int __set_page_dirty_no_writeback(struct page *page)
 
 /*
  * Helper function for set_page_dirty family.
+ *
+ * Caller must hold mem_cgroup_begin_page_stat().
+ *
  * NOTE: This relies on being atomic wrt interrupts.
  */
-void account_page_dirtied(struct page *page, struct address_space *mapping)
+void account_page_dirtied(struct page *page, struct address_space *mapping,
+			  struct mem_cgroup *memcg)
 {
 	trace_writeback_dirty_page(page, mapping);
 
 	if (mapping_cap_account_dirty(mapping)) {
 		struct backing_dev_info *bdi = inode_to_bdi(mapping->host);
 
+#ifdef CONFIG_BLK_DEV_THROTTLING
+		struct blkcg_gq *blkg;
+
+		if (!mapping->host || !mapping->host->i_sb ||
+		    !mapping->host->i_sb->s_bdev)
+			goto skip;
+
+		rcu_read_lock();
+		blkg = task_blkcg_gq(current, mapping->host->i_sb->s_bdev);
+		if (blkg)
+			/*lint -save -e732 -e737 -e747*/
+			__percpu_counter_add(&blkg->nr_dirtied, 1, WB_STAT_BATCH);
+			/*lint -restore*/
+		rcu_read_unlock();
+skip:
+#endif
+
+		mem_cgroup_inc_page_stat(memcg, MEM_CGROUP_STAT_DIRTY);
 		__inc_zone_page_state(page, NR_FILE_DIRTY);
 		__inc_zone_page_state(page, NR_DIRTIED);
-		__inc_bdi_stat(bdi, BDI_RECLAIMABLE);
-		__inc_bdi_stat(bdi, BDI_DIRTIED);
+		__inc_wb_stat(&bdi->wb, WB_RECLAIMABLE);
+		__inc_wb_stat(&bdi->wb, WB_DIRTIED);
 		task_io_account_write(PAGE_CACHE_SIZE);
 		current->nr_dirtied++;
 		this_cpu_inc(bdp_ratelimits);
@@ -2113,21 +2167,18 @@ EXPORT_SYMBOL(account_page_dirtied);
 /*
  * Helper function for deaccounting dirty page without writeback.
  *
- * Doing this should *normally* only ever be done when a page
- * is truncated, and is not actually mapped anywhere at all. However,
- * fs/buffer.c does this when it notices that somebody has cleaned
- * out all the buffers on a page without actually doing it through
- * the VM. Can you say "ext3 is horribly ugly"? Thought you could.
+ * Caller must hold mem_cgroup_begin_page_stat().
  */
-void account_page_cleaned(struct page *page, struct address_space *mapping)
+void account_page_cleaned(struct page *page, struct address_space *mapping,
+			  struct mem_cgroup *memcg)
 {
 	if (mapping_cap_account_dirty(mapping)) {
+		mem_cgroup_dec_page_stat(memcg, MEM_CGROUP_STAT_DIRTY);
 		dec_zone_page_state(page, NR_FILE_DIRTY);
-		dec_bdi_stat(inode_to_bdi(mapping->host), BDI_RECLAIMABLE);
+		dec_wb_stat(&inode_to_bdi(mapping->host)->wb, WB_RECLAIMABLE);
 		task_io_account_cancelled_write(PAGE_CACHE_SIZE);
 	}
 }
-EXPORT_SYMBOL(account_page_cleaned);
 
 /*
  * For address_spaces which do not use buffers.  Just tag the page as dirty in
@@ -2143,26 +2194,34 @@ EXPORT_SYMBOL(account_page_cleaned);
  */
 int __set_page_dirty_nobuffers(struct page *page)
 {
+	struct mem_cgroup *memcg;
+
+	memcg = mem_cgroup_begin_page_stat(page);
 	if (!TestSetPageDirty(page)) {
 		struct address_space *mapping = page_mapping(page);
 		unsigned long flags;
 
-		if (!mapping)
+		if (!mapping) {
+			mem_cgroup_end_page_stat(memcg);
 			return 1;
+		}
 
 		spin_lock_irqsave(&mapping->tree_lock, flags);
 		BUG_ON(page_mapping(page) != mapping);
 		WARN_ON_ONCE(!PagePrivate(page) && !PageUptodate(page));
-		account_page_dirtied(page, mapping);
+		account_page_dirtied(page, mapping, memcg);
 		radix_tree_tag_set(&mapping->page_tree, page_index(page),
 				   PAGECACHE_TAG_DIRTY);
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
+		mem_cgroup_end_page_stat(memcg);
+
 		if (mapping->host) {
 			/* !PageAnon && !swapper_space */
 			__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 		}
 		return 1;
 	}
+	mem_cgroup_end_page_stat(memcg);
 	return 0;
 }
 EXPORT_SYMBOL(__set_page_dirty_nobuffers);
@@ -2180,7 +2239,7 @@ void account_page_redirty(struct page *page)
 	if (mapping && mapping_cap_account_dirty(mapping)) {
 		current->nr_dirtied--;
 		dec_zone_page_state(page, NR_DIRTIED);
-		dec_bdi_stat(inode_to_bdi(mapping->host), BDI_DIRTIED);
+		dec_wb_stat(&inode_to_bdi(mapping->host)->wb, WB_DIRTIED);
 	}
 }
 EXPORT_SYMBOL(account_page_redirty);
@@ -2266,6 +2325,38 @@ int set_page_dirty_lock(struct page *page)
 EXPORT_SYMBOL(set_page_dirty_lock);
 
 /*
+ * This cancels just the dirty bit on the kernel page itself, it does NOT
+ * actually remove dirty bits on any mmap's that may be around. It also
+ * leaves the page tagged dirty, so any sync activity will still find it on
+ * the dirty lists, and in particular, clear_page_dirty_for_io() will still
+ * look at the dirty bits in the VM.
+ *
+ * Doing this should *normally* only ever be done when a page is truncated,
+ * and is not actually mapped anywhere at all. However, fs/buffer.c does
+ * this when it notices that somebody has cleaned out all the buffers on a
+ * page without actually doing it through the VM. Can you say "ext3 is
+ * horribly ugly"? Thought you could.
+ */
+void cancel_dirty_page(struct page *page)
+{
+	struct address_space *mapping = page_mapping(page);
+
+	if (mapping_cap_account_dirty(mapping)) {
+		struct mem_cgroup *memcg;
+
+		memcg = mem_cgroup_begin_page_stat(page);
+
+		if (TestClearPageDirty(page))
+			account_page_cleaned(page, mapping, memcg);
+
+		mem_cgroup_end_page_stat(memcg);
+	} else {
+		ClearPageDirty(page);
+	}
+}
+EXPORT_SYMBOL(cancel_dirty_page);
+
+/*
  * Clear a page's dirty flag, while caring for dirty memory accounting.
  * Returns true if the page was previously dirty.
  *
@@ -2282,6 +2373,8 @@ EXPORT_SYMBOL(set_page_dirty_lock);
 int clear_page_dirty_for_io(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
+	struct mem_cgroup *memcg;
+	int ret = 0;
 
 	BUG_ON(!PageLocked(page));
 
@@ -2321,13 +2414,16 @@ int clear_page_dirty_for_io(struct page *page)
 		 * always locked coming in here, so we get the desired
 		 * exclusion.
 		 */
+		memcg = mem_cgroup_begin_page_stat(page);
 		if (TestClearPageDirty(page)) {
+			mem_cgroup_dec_page_stat(memcg, MEM_CGROUP_STAT_DIRTY);
 			dec_zone_page_state(page, NR_FILE_DIRTY);
-			dec_bdi_stat(inode_to_bdi(mapping->host),
-					BDI_RECLAIMABLE);
-			return 1;
+			dec_wb_stat(&inode_to_bdi(mapping->host)->wb,
+				    WB_RECLAIMABLE);
+			ret = 1;
 		}
-		return 0;
+		mem_cgroup_end_page_stat(memcg);
+		return ret;
 	}
 	return TestClearPageDirty(page);
 }
@@ -2351,8 +2447,8 @@ int test_clear_page_writeback(struct page *page)
 						page_index(page),
 						PAGECACHE_TAG_WRITEBACK);
 			if (bdi_cap_account_writeback(bdi)) {
-				__dec_bdi_stat(bdi, BDI_WRITEBACK);
-				__bdi_writeout_inc(bdi);
+				__dec_wb_stat(&bdi->wb, WB_WRITEBACK);
+				__wb_writeout_inc(&bdi->wb);
 			}
 		}
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
@@ -2386,7 +2482,7 @@ int __test_set_page_writeback(struct page *page, bool keep_write)
 						page_index(page),
 						PAGECACHE_TAG_WRITEBACK);
 			if (bdi_cap_account_writeback(bdi))
-				__inc_bdi_stat(bdi, BDI_WRITEBACK);
+				__inc_wb_stat(&bdi->wb, WB_WRITEBACK);
 		}
 		if (!PageDirty(page))
 			radix_tree_tag_clear(&mapping->page_tree,

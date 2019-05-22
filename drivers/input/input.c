@@ -674,16 +674,19 @@ EXPORT_SYMBOL(input_close_device);
  */
 static void input_dev_release_keys(struct input_dev *dev)
 {
+	bool need_sync = false;
 	int code;
 
 	if (is_event_supported(EV_KEY, dev->evbit, EV_MAX)) {
-		for (code = 0; code <= KEY_MAX; code++) {
-			if (is_event_supported(code, dev->keybit, KEY_MAX) &&
-			    __test_and_clear_bit(code, dev->key)) {
-				input_pass_event(dev, EV_KEY, code, 0);
-			}
+		for_each_set_bit(code, dev->key, KEY_CNT) {
+			input_pass_event(dev, EV_KEY, code, 0);
+			need_sync = true;
 		}
-		input_pass_event(dev, EV_SYN, SYN_REPORT, 1);
+
+		if (need_sync)
+			input_pass_event(dev, EV_SYN, SYN_REPORT, 1);
+
+		memset(dev->key, 0, sizeof(dev->key));/*[false alarm]:return */
 	}
 }
 
@@ -2012,14 +2015,14 @@ static unsigned int input_estimate_events_per_packet(struct input_dev *dev)
 
 static void input_cleanse_bitmasks(struct input_dev *dev)
 {
-	INPUT_CLEANSE_BITMASK(dev, KEY, key);
-	INPUT_CLEANSE_BITMASK(dev, REL, rel);
-	INPUT_CLEANSE_BITMASK(dev, ABS, abs);
-	INPUT_CLEANSE_BITMASK(dev, MSC, msc);
-	INPUT_CLEANSE_BITMASK(dev, LED, led);
-	INPUT_CLEANSE_BITMASK(dev, SND, snd);
-	INPUT_CLEANSE_BITMASK(dev, FF, ff);
-	INPUT_CLEANSE_BITMASK(dev, SW, sw);
+	INPUT_CLEANSE_BITMASK(dev, KEY, key);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, REL, rel);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, ABS, abs);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, MSC, msc);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, LED, led);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, SND, snd);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, FF, ff);/*[false alarm]:return */
+	INPUT_CLEANSE_BITMASK(dev, SW, sw);/*[false alarm]:return */
 }
 
 static void __input_unregister_device(struct input_dev *dev)

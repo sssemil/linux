@@ -37,6 +37,7 @@
 #include <linux/uio.h>
 #include <linux/atomic.h>
 #include <linux/prefetch.h>
+#include <linux/fscrypto.h>
 
 /*
  * How many user pages to map in one call to get_user_pages().  This determines
@@ -386,6 +387,19 @@ static inline void dio_bio_submit(struct dio *dio, struct dio_submit *sdio)
 {
 	struct bio *bio = sdio->bio;
 	unsigned long flags;
+#ifdef CONFIG_FS_ENCRYPTION
+	struct inode *inode = dio->inode;
+
+	if (fscrypt_has_encryption_key(inode) && S_ISREG(inode->i_mode) &&
+		inode->i_sb->s_cop->is_inline_encrypted &&
+		inode->i_sb->s_cop->is_inline_encrypted(inode)) {
+		bio->ci_key = fscrypt_ci_key(inode);
+		bio->ci_key_len = fscrypt_ci_key_len(inode);
+		/*lint -save -e704*/
+		bio->index = sdio->logical_offset_in_bio >> sdio->blkbits;
+		/*lint -restore*/
+	}
+#endif
 
 	bio->bi_private = dio;
 
@@ -1159,6 +1173,16 @@ do_blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 		}
 	}
 
+	/* Once we sampled i_size check for reads beyond EOF */
+	dio->i_size = i_size_read(inode);
+	if (iov_iter_rw(iter) == READ && offset >= dio->i_size) {
+		if (dio->flags & DIO_LOCKING)
+			mutex_unlock(&inode->i_mutex);
+		kmem_cache_free(dio_cache, dio);
+		retval = 0;
+		goto out;
+	}
+
 	/*
 	 * For file extending writes updating i_size before data writeouts
 	 * complete can expose uninitialized blocks in dumb filesystems.
@@ -1212,7 +1236,6 @@ do_blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	sdio.next_block_for_io = -1;
 
 	dio->iocb = iocb;
-	dio->i_size = i_size_read(inode);
 
 	spin_lock_init(&dio->bio_lock);
 	dio->refcount = 1;

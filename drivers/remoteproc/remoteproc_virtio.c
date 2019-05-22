@@ -142,6 +142,8 @@ static void rproc_virtio_del_vqs(struct virtio_device *vdev)
 	rproc_shutdown(rproc);
 
 	__rproc_virtio_del_vqs(vdev);
+
+	vdev->config->reset(vdev);
 }
 
 static int rproc_virtio_find_vqs(struct virtio_device *vdev, unsigned nvqs,
@@ -152,7 +154,7 @@ static int rproc_virtio_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 	struct rproc *rproc = vdev_to_rproc(vdev);
 	int i, ret;
 
-	for (i = 0; i < nvqs; ++i) {
+	for (i = 0; i < nvqs; ++i) {/*lint !e574 */
 		vqs[i] = rp_find_vq(vdev, i, callbacks[i], names[i]);
 		if (IS_ERR(vqs[i])) {
 			ret = PTR_ERR(vqs[i]);

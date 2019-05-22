@@ -1039,4 +1039,9 @@
 #define USB_VENDOR_ID_RISO_KAGAKU	0x1294	/* Riso Kagaku Corp. */
 #define USB_DEVICE_ID_RI_KA_WEBMAIL	0x1320	/* Webmail Notifier */
 
+#if IS_ENABLED(CONFIG_HID_VR)
+#define USB_VENDOR_ID_HUAWEI		0x12d1
+#define USB_DEVICE_ID_HUAWEI_VR		0x1092
+#endif
+
 #endif

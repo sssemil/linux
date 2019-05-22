@@ -1052,6 +1052,9 @@ fb_set_var(struct fb_info *info, struct fb_var_screeninfo *var)
 }
 EXPORT_SYMBOL(fb_set_var);
 
+#if defined(CONFIG_HISI_FB_3650) || defined(CONFIG_HISI_FB_6250) || defined(CONFIG_HISI_FB_3660)
+extern int g_debug_enable_lcd_sleep_in;
+#endif
 int
 fb_blank(struct fb_info *info, int blank)
 {	
@@ -1063,6 +1066,16 @@ fb_blank(struct fb_info *info, int blank)
 
 	event.info = info;
 	event.data = &blank;
+
+#if defined(CONFIG_HISI_FB_3650) || defined(CONFIG_HISI_FB_6250) || defined(CONFIG_HISI_FB_3660)
+	if (g_debug_enable_lcd_sleep_in) {
+		if (info->fbops->fb_blank) {
+			ret = info->fbops->fb_blank(blank, info);
+		}
+
+		return ret;
+	}
+#endif
 
 	early_ret = fb_notifier_call_chain(FB_EARLY_EVENT_BLANK, &event);
 

@@ -43,6 +43,12 @@
 #include <linux/bit_spinlock.h>
 #include <trace/events/block.h>
 
+#ifdef CONFIG_HUAWEI_IO_TRACING
+#include <trace/iotrace.h>
+DEFINE_TRACE(block_write_begin_enter);
+DEFINE_TRACE(block_write_begin_end);
+#endif
+
 static int fsync_buffers_list(spinlock_t *lock, struct list_head *list);
 
 #define BH_ENTRY(list) list_entry((list), struct buffer_head, b_assoc_buffers)
@@ -623,21 +629,22 @@ EXPORT_SYMBOL(mark_buffer_dirty_inode);
  *
  * If warn is true, then emit a warning if the page is not uptodate and has
  * not been truncated.
+ *
+ * The caller must hold mem_cgroup_begin_page_stat() lock.
  */
-static void __set_page_dirty(struct page *page,
-		struct address_space *mapping, int warn)
+static void __set_page_dirty(struct page *page, struct address_space *mapping,
+			     struct mem_cgroup *memcg, int warn)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&mapping->tree_lock, flags);
 	if (page->mapping) {	/* Race with truncate? */
 		WARN_ON_ONCE(warn && !PageUptodate(page));
-		account_page_dirtied(page, mapping);
+		account_page_dirtied(page, mapping, memcg);
 		radix_tree_tag_set(&mapping->page_tree,
 				page_index(page), PAGECACHE_TAG_DIRTY);
 	}
 	spin_unlock_irqrestore(&mapping->tree_lock, flags);
-	__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 }
 
 /*
@@ -668,6 +675,7 @@ static void __set_page_dirty(struct page *page,
 int __set_page_dirty_buffers(struct page *page)
 {
 	int newly_dirty;
+	struct mem_cgroup *memcg;
 	struct address_space *mapping = page_mapping(page);
 
 	if (unlikely(!mapping))
@@ -683,11 +691,22 @@ int __set_page_dirty_buffers(struct page *page)
 			bh = bh->b_this_page;
 		} while (bh != head);
 	}
+	/*
+	 * Use mem_group_begin_page_stat() to keep PageDirty synchronized with
+	 * per-memcg dirty page counters.
+	 */
+	memcg = mem_cgroup_begin_page_stat(page);
 	newly_dirty = !TestSetPageDirty(page);
 	spin_unlock(&mapping->private_lock);
 
 	if (newly_dirty)
-		__set_page_dirty(page, mapping, 1);
+		__set_page_dirty(page, mapping, memcg, 1);
+
+	mem_cgroup_end_page_stat(memcg);
+
+	if (newly_dirty)
+		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
+
 	return newly_dirty;
 }
 EXPORT_SYMBOL(__set_page_dirty_buffers);
@@ -1158,11 +1177,18 @@ void mark_buffer_dirty(struct buffer_head *bh)
 
 	if (!test_set_buffer_dirty(bh)) {
 		struct page *page = bh->b_page;
+		struct address_space *mapping = NULL;
+		struct mem_cgroup *memcg;
+
+		memcg = mem_cgroup_begin_page_stat(page);
 		if (!TestSetPageDirty(page)) {
-			struct address_space *mapping = page_mapping(page);
+			mapping = page_mapping(page);
 			if (mapping)
-				__set_page_dirty(page, mapping, 0);
+				__set_page_dirty(page, mapping, memcg, 0);
 		}
+		mem_cgroup_end_page_stat(memcg);
+		if (mapping)
+			__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 	}
 }
 EXPORT_SYMBOL(mark_buffer_dirty);
@@ -1684,8 +1710,7 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 	struct buffer_head *bh, *head;
 	unsigned int blocksize, bbits;
 	int nr_underway = 0;
-	int write_op = (wbc->sync_mode == WB_SYNC_ALL ?
-			WRITE_SYNC : WRITE);
+	int write_op = wbc_to_write_cmd(wbc);
 
 	head = create_page_buffers(page, inode,
 					(1 << BH_Dirty)|(1 << BH_Uptodate));
@@ -1896,6 +1921,10 @@ int __block_write_begin(struct page *page, loff_t pos, unsigned len,
 	BUG_ON(to > PAGE_CACHE_SIZE);
 	BUG_ON(from > to);
 
+#ifdef CONFIG_HUAWEI_IO_TRACING 
+    trace_block_write_begin_enter(inode, page, pos, len);
+#endif
+
 	head = create_page_buffers(page, inode, 0);
 	blocksize = head->b_size;
 	bbits = block_size_bits(blocksize);
@@ -1957,7 +1986,12 @@ int __block_write_begin(struct page *page, loff_t pos, unsigned len,
 	}
 	if (unlikely(err))
 		page_zero_new_buffers(page, from, to);
-	return err;
+	
+#ifdef CONFIG_HUAWEI_IO_TRACING 
+    trace_block_write_begin_end(inode, page, err);
+#endif 
+
+    return err;
 }
 EXPORT_SYMBOL(__block_write_begin);
 
@@ -2938,10 +2972,6 @@ static void end_bio_bh_io_sync(struct bio *bio, int err)
 {
 	struct buffer_head *bh = bio->bi_private;
 
-	if (err == -EOPNOTSUPP) {
-		set_bit(BIO_EOPNOTSUPP, &bio->bi_flags);
-	}
-
 	if (unlikely (test_bit(BIO_QUIET,&bio->bi_flags)))
 		set_bit(BH_Quiet, &bh->b_state);
 
@@ -3041,13 +3071,7 @@ int _submit_bh(int rw, struct buffer_head *bh, unsigned long bio_flags)
 	if (buffer_prio(bh))
 		rw |= REQ_PRIO;
 
-	bio_get(bio);
 	submit_bio(rw, bio);
-
-	if (bio_flagged(bio, BIO_EOPNOTSUPP))
-		ret = -EOPNOTSUPP;
-
-	bio_put(bio);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(_submit_bh);
@@ -3243,8 +3267,8 @@ int try_to_free_buffers(struct page *page)
 	 * to synchronise against __set_page_dirty_buffers and prevent the
 	 * dirty bit from being lost.
 	 */
-	if (ret && TestClearPageDirty(page))
-		account_page_cleaned(page, mapping);
+	if (ret)
+		cancel_dirty_page(page);
 	spin_unlock(&mapping->private_lock);
 out:
 	if (buffers_to_free) {
@@ -3305,7 +3329,9 @@ struct bh_accounting {
 	int ratelimit;		/* Limit cacheline bouncing */
 };
 
+/*lint –save –e551*/
 static DEFINE_PER_CPU(struct bh_accounting, bh_accounting) = {0, 0};
+/*lint -restore*/
 
 static void recalc_bh_state(void)
 {

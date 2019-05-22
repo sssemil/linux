@@ -26,7 +26,6 @@
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
-#include <asm/unaligned.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -436,6 +435,22 @@ static void scsi_report_sense(struct scsi_device *sdev,
 	}
 }
 
+/*enable samsung UFS ffu link lost recovery solution on kirin*/
+#define FEATURE_SAMSUNG_FFU_LINK_LOST_RECOVERY
+
+/* define sense data value of samsung UFS link lost status after ffu */
+#ifdef FEATURE_SAMSUNG_FFU_LINK_LOST_RECOVERY
+
+#define UFS_VENDOR_STRING_SAMSUNG "SAMSUNG"
+#define SAMSUNG_FFU_LINK_LOST_ASC_VALUE     0x80
+#define SAMSUNG_FFU_LINK_LOST_ASCQ_VALUE    0x09
+
+#ifndef UFSHCD
+#define UFSHCD "ufshcd"
+#endif
+
+#endif
+
 /**
  * scsi_check_sense - Examine scsi cmd sense
  * @scmd:	Cmd to have sense checked.
@@ -453,7 +468,9 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
 	struct scsi_sense_hdr sshdr;
 
 	if (! scsi_command_normalize_sense(scmd, &sshdr))
+	{
 		return FAILED;	/* no valid sense data */
+	}
 
 	scsi_report_sense(sdev, &sshdr);
 
@@ -580,8 +597,12 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
 		return NEEDS_RETRY;
 
 	case HARDWARE_ERROR:
-		if (scmd->device->retry_hwerror)
+		if (scmd->device->retry_hwerror){
 			return ADD_TO_MLQUEUE;
+		}else if(scmd->device->reset_hwerror){
+			pr_err("%s: reset hwerror\n", __func__);
+			return FAILED;
+		}
 		else
 			set_host_byte(scmd, DID_TARGET_FAILURE);
 
@@ -592,6 +613,23 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
 		    sshdr.asc == 0x26) { /* Parameter value invalid */
 			set_host_byte(scmd, DID_TARGET_FAILURE);
 		}
+
+#ifdef FEATURE_SAMSUNG_FFU_LINK_LOST_RECOVERY
+		if( (sdev->type == TYPE_DISK) 
+			&& (sshdr.asc == SAMSUNG_FFU_LINK_LOST_ASC_VALUE) 
+			&& (sshdr.ascq == SAMSUNG_FFU_LINK_LOST_ASCQ_VALUE) 
+			&& (NULL != sdev->vendor) 
+			&& !strncmp(sdev->vendor,UFS_VENDOR_STRING_SAMSUNG,strlen(UFS_VENDOR_STRING_SAMSUNG)) 
+			&& (NULL != sdev->host) 
+			&& (NULL != sdev->host->hostt) 
+			&& (NULL != sdev->host->hostt->name) 
+			&& !strncmp(sdev->host->hostt->name,UFSHCD,strlen(UFSHCD)) )
+		{
+			SCSI_LOG_ERROR_RECOVERY(3,sdev_printk(KERN_INFO, sdev,"%s: UFS FFU LINK LOST SAMSUNG return FAILED and scsi retry.\n",current->comm));
+			return FAILED;
+		}
+#endif
+
 		return SUCCESS;
 
 	default:
@@ -944,7 +982,7 @@ void scsi_eh_prep_cmnd(struct scsi_cmnd *scmd, struct scsi_eh_save *ses,
 			    scmd->sdb.length);
 		scmd->sdb.table.sgl = &ses->sense_sgl;
 		scmd->sc_data_direction = DMA_FROM_DEVICE;
-		scmd->sdb.table.nents = 1;
+		scmd->sdb.table.nents = scmd->sdb.table.orig_nents = 1;
 		scmd->cmnd[0] = REQUEST_SENSE;
 		scmd->cmnd[4] = scmd->sdb.length;
 		scmd->cmd_len = COMMAND_SIZE(scmd->cmnd[0]);
@@ -2170,8 +2208,17 @@ int scsi_error_handler(void *data)
 	 * We never actually get interrupted because kthread_run
 	 * disables signal delivery for the created thread.
 	 */
-	while (!kthread_should_stop()) {
+	while (true) {
+		/*
+		 * The sequence in kthread_stop() sets the stop flag first
+		 * then wakes the process.  To avoid missed wakeups, the task
+		 * should always be in a non running state before the stop
+		 * flag is checked
+		 */
 		set_current_state(TASK_INTERRUPTIBLE);
+		if (kthread_should_stop())
+			break;
+
 		if ((shost->host_failed == 0 && shost->host_eh_scheduled == 0) ||
 		    shost->host_failed != atomic_read(&shost->host_busy)) {
 			SCSI_LOG_ERROR_RECOVERY(1,
@@ -2587,33 +2634,3 @@ void scsi_build_sense_buffer(int desc, u8 *buf, u8 key, u8 asc, u8 ascq)
 	}
 }
 EXPORT_SYMBOL(scsi_build_sense_buffer);
-
-/**
- * scsi_set_sense_information - set the information field in a
- *		formatted sense data buffer
- * @buf:	Where to build sense data
- * @info:	64-bit information value to be set
- *
- **/
-void scsi_set_sense_information(u8 *buf, u64 info)
-{
-	if ((buf[0] & 0x7f) == 0x72) {
-		u8 *ucp, len;
-
-		len = buf[7];
-		ucp = (char *)scsi_sense_desc_find(buf, len + 8, 0);
-		if (!ucp) {
-			buf[7] = len + 0xa;
-			ucp = buf + 8 + len;
-		}
-		ucp[0] = 0;
-		ucp[1] = 0xa;
-		ucp[2] = 0x80; /* Valid bit */
-		ucp[3] = 0;
-		put_unaligned_be64(info, &ucp[4]);
-	} else if ((buf[0] & 0x7f) == 0x70) {
-		buf[0] |= 0x80;
-		put_unaligned_be64(info, &buf[3]);
-	}
-}
-EXPORT_SYMBOL(scsi_set_sense_information);

@@ -30,6 +30,8 @@
 #include <linux/compiler.h>
 #include <linux/llist.h>
 #include <linux/bitops.h>
+#include <linux/hisi/page_tracker.h>
+#include <linux/hisi/rdr_hisi_ap_hook.h>
 
 #include <asm/uaccess.h>
 #include <asm/tlbflush.h>
@@ -273,12 +275,12 @@ EXPORT_SYMBOL(vmalloc_to_pfn);
 /*** Global kva allocator ***/
 
 #define VM_LAZY_FREE	0x01
-#define VM_LAZY_FREEING	0x02
 #define VM_VM_AREA	0x04
 
 static DEFINE_SPINLOCK(vmap_area_lock);
 /* Export for kexec only */
 LIST_HEAD(vmap_area_list);
+static LLIST_HEAD(vmap_purge_list);
 static struct rb_root vmap_area_root = RB_ROOT;
 
 /* The vmap cache globals are protected by vmap_area_lock */
@@ -570,7 +572,7 @@ static unsigned long lazy_max_pages(void)
 
 	log = fls(num_online_cpus());
 
-	return log * (32UL * 1024 * 1024 / PAGE_SIZE);
+	return max((log * (32UL * 1024 * 1024 / PAGE_SIZE) * 2 / 3), (32UL * 1024 * 1024 / PAGE_SIZE));
 }
 
 static atomic_t vmap_lazy_nr = ATOMIC_INIT(0);
@@ -601,7 +603,7 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
 					int sync, int force_flush)
 {
 	static DEFINE_SPINLOCK(purge_lock);
-	LIST_HEAD(valist);
+	struct llist_node *valist;
 	struct vmap_area *va;
 	struct vmap_area *n_va;
 	int nr = 0;
@@ -620,20 +622,14 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
 	if (sync)
 		purge_fragmented_blocks_allcpus();
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(va, &vmap_area_list, list) {
-		if (va->flags & VM_LAZY_FREE) {
-			if (va->va_start < *start)
-				*start = va->va_start;
-			if (va->va_end > *end)
-				*end = va->va_end;
-			nr += (va->va_end - va->va_start) >> PAGE_SHIFT;
-			list_add_tail(&va->purge_list, &valist);
-			va->flags |= VM_LAZY_FREEING;
-			va->flags &= ~VM_LAZY_FREE;
-		}
+	valist = llist_del_all(&vmap_purge_list);
+	llist_for_each_entry(va, valist, purge_list) {
+		if (va->va_start < *start)
+			*start = va->va_start;
+		if (va->va_end > *end)
+			*end = va->va_end;
+		nr += (va->va_end - va->va_start) >> PAGE_SHIFT;
 	}
-	rcu_read_unlock();
 
 	if (nr)
 		atomic_sub(nr, &vmap_lazy_nr);
@@ -643,7 +639,7 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
 
 	if (nr) {
 		spin_lock(&vmap_area_lock);
-		list_for_each_entry_safe(va, n_va, &valist, purge_list)
+		llist_for_each_entry_safe(va, n_va, valist, purge_list)
 			__free_vmap_area(va);
 		spin_unlock(&vmap_area_lock);
 	}
@@ -678,9 +674,16 @@ static void purge_vmap_area_lazy(void)
  */
 static void free_vmap_area_noflush(struct vmap_area *va)
 {
+	int nr_lazy;
+
 	va->flags |= VM_LAZY_FREE;
-	atomic_add((va->va_end - va->va_start) >> PAGE_SHIFT, &vmap_lazy_nr);
-	if (unlikely(atomic_read(&vmap_lazy_nr) > lazy_max_pages()))
+	nr_lazy = atomic_add_return((va->va_end - va->va_start) >> PAGE_SHIFT,
+					&vmap_lazy_nr);
+
+	/* After this point, we may free va at any time */
+	llist_add(&va->purge_list, &vmap_purge_list);
+
+	if (unlikely(nr_lazy > lazy_max_pages()))
 		try_purge_vmap_area_lazy();
 }
 
@@ -1309,6 +1312,11 @@ static void setup_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
 	vm->addr = (void *)va->va_start;
 	vm->size = va->va_end - va->va_start;
 	vm->caller = caller;
+#ifdef CONFIG_DEBUG_VMALLOC
+	vm->pid = current->pid;
+	memset(vm->task_name, 0, TASK_COMM_LEN);
+	memcpy(vm->task_name, current->comm, TASK_COMM_LEN - 1);
+#endif
 	va->vm = vm;
 	va->flags |= VM_VM_AREA;
 	spin_unlock(&vmap_area_lock);
@@ -1517,6 +1525,8 @@ void vfree(const void *addr)
 			schedule_work(&p->wq);
 	} else
 		__vunmap(addr, 1);
+
+	vmalloc_trace_hook((unsigned char)MEM_FREE, _RET_IP_, (unsigned long)addr, 0, (unsigned long long)0);/*lint !e571*/
 }
 EXPORT_SYMBOL(vfree);
 
@@ -1597,6 +1607,11 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		pages = kmalloc_node(array_size, nested_gfp, node);
 	}
 	area->pages = pages;
+#ifdef CONFIG_DEBUG_VMALLOC
+	area->pid = current->pid;
+	memset(area->task_name, 0, TASK_COMM_LEN);
+	memcpy(area->task_name, current->comm, TASK_COMM_LEN - 1);
+#endif
 	if (!area->pages) {
 		remove_vm_area(area->addr);
 		kfree(area);
@@ -1617,6 +1632,7 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 			goto fail;
 		}
 		area->pages[i] = page;
+		page_tracker_set_type(page, TRACK_VMALLOC, order);
 		if (gfp_mask & __GFP_WAIT)
 			cond_resched();
 	}
@@ -1684,6 +1700,9 @@ void *__vmalloc_node_range(unsigned long size, unsigned long align,
 	 * the vmalloc'ed block.
 	 */
 	kmemleak_alloc(addr, real_size, 2, gfp_mask);
+
+	vmalloc_trace_hook((unsigned char)MEM_ALLOC, (unsigned long)caller, (unsigned long)addr,
+						(struct page *)area->pages[0], size);
 
 	return addr;
 
@@ -2653,6 +2672,14 @@ static int s_show(struct seq_file *m, void *p)
 	if (v->flags & VM_VPAGES)
 		seq_puts(m, " vpages");
 
+#ifdef CONFIG_DEBUG_VMALLOC
+	if (v->pid)
+		seq_printf(m, " pid=%d", v->pid);
+
+	if (v->task_name)
+		seq_printf(m, " task_name=%s", v->task_name);
+#endif
+
 	show_numa_info(m, v);
 	seq_putc(m, '\n');
 	return 0;
@@ -2717,7 +2744,7 @@ void get_vmalloc_info(struct vmalloc_info *vmi)
 		if (addr >= VMALLOC_END)
 			break;
 
-		if (va->flags & (VM_LAZY_FREE | VM_LAZY_FREEING))
+		if (va->flags & VM_LAZY_FREE)
 			continue;
 
 		vmi->used += (va->va_end - va->va_start);

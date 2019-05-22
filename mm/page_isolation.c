@@ -5,6 +5,7 @@
 #include <linux/mm.h>
 #include <linux/page-isolation.h>
 #include <linux/pageblock-flags.h>
+#include <linux/sched.h>
 #include <linux/memory.h>
 #include <linux/hugetlb.h>
 #include "internal.h"
@@ -216,8 +217,15 @@ __test_page_isolated_in_pageblock(unsigned long pfn, unsigned long end_pfn,
 				  bool skip_hwpoisoned_pages)
 {
 	struct page *page;
+	int pass = 0;
+	int max_time = 10000;
 
 	while (pfn < end_pfn) {
+retry:
+		if (pass > max_time) {
+			pass = 0;
+			break;
+		}
 		if (!pfn_valid_within(pfn)) {
 			pfn++;
 			continue;
@@ -251,12 +259,22 @@ __test_page_isolated_in_pageblock(unsigned long pfn, unsigned long end_pfn,
 			pfn++;
 			continue;
 		}
-		else
+		else if (page_count(page) == 0 && page_is_cma(page)) {
+			/**
+			 * Wait here if the pagecount is freed
+			 * and the page is adding to buddy.
+			 */
+			pass ++;
+			cond_resched();
+			goto retry;
+		}
+		else {
 			break;
+		}
 	}
 	if (pfn < end_pfn)
 		return 0;
-	return 1;
+	return 1; /*lint !e438 */
 }
 
 int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
@@ -300,11 +318,11 @@ struct page *alloc_migrate_target(struct page *page, unsigned long private,
 	 * now as a simple work-around, we use the next node for destination.
 	 */
 	if (PageHuge(page)) {
-		nodemask_t src = nodemask_of_node(page_to_nid(page));
-		nodemask_t dst;
-		nodes_complement(dst, src);
+		int node = next_online_node(page_to_nid(page));
+		if (node == MAX_NUMNODES)
+			node = first_online_node;
 		return alloc_huge_page_node(page_hstate(compound_head(page)),
-					    next_node(page_to_nid(page), dst));
+					    node);
 	}
 
 	if (PageHighMem(page))

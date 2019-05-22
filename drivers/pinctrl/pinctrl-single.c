@@ -347,13 +347,28 @@ static void pcs_pin_dbg_show(struct pinctrl_dev *pctldev,
 {
 	struct pcs_device *pcs;
 	unsigned val, mux_bytes;
-
+#if defined CONFIG_HISI_PINCRTL_INFO
+	struct pcs_gpiofunc_range *frange = NULL;
+	struct list_head *pos, *tmp;
+#endif
 	pcs = pinctrl_dev_get_drvdata(pctldev);
-
+#if defined CONFIG_HISI_PINCRTL_INFO
+	list_for_each_safe(pos, tmp, &pcs->gpiofuncs) {
+		frange = list_entry(pos, struct pcs_gpiofunc_range, node); /*lint !e826 */
+		if (pin >= frange->offset + frange->npins
+			|| pin < frange->offset)
+			continue;
+		mux_bytes = pcs->width / BITS_PER_BYTE;
+		val = (unsigned)pcs->read(pcs->base + pin * mux_bytes); /*lint !e124 */
+		seq_printf(s, "%08x %s " , val, DRIVER_NAME);
+		break;
+	}
+#else
 	mux_bytes = pcs->width / BITS_PER_BYTE;
 	val = pcs->read(pcs->base + pin * mux_bytes);
 
 	seq_printf(s, "%08x %s " , val, DRIVER_NAME);
+#endif
 }
 
 static void pcs_dt_free_map(struct pinctrl_dev *pctldev,
@@ -1273,9 +1288,9 @@ static int pcs_parse_bits_in_pinctrl_entry(struct pcs_device *pcs,
 
 		/* Parse pins in each row from LSB */
 		while (mask) {
-			bit_pos = ffs(mask);
+			bit_pos = __ffs(mask);
 			pin_num_from_lsb = bit_pos / pcs->bits_per_pin;
-			mask_pos = ((pcs->fmask) << (bit_pos - 1));
+			mask_pos = ((pcs->fmask) << bit_pos);
 			val_pos = val & mask_pos;
 			submask = mask & mask_pos;
 
@@ -1576,6 +1591,9 @@ static inline void pcs_irq_set(struct pcs_soc_data *pcs_soc,
 		else
 			mask &= ~soc_mask;
 		pcs->write(mask, pcswi->reg);
+
+		/* flush posted write */
+		mask = pcs->read(pcswi->reg);
 		raw_spin_unlock(&pcs->lock);
 	}
 
@@ -1668,7 +1686,7 @@ static irqreturn_t pcs_irq_handler(int irq, void *d)
 {
 	struct pcs_soc_data *pcs_soc = d;
 
-	return pcs_irq_handle(pcs_soc) ? IRQ_HANDLED : IRQ_NONE;
+	return pcs_irq_handle(pcs_soc) ? IRQ_HANDLED : IRQ_NONE;/*[false alarm]:return */
 }
 
 /**
@@ -1851,7 +1869,7 @@ static int pcs_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(np, "pinctrl-single,function-mask",
 				   &pcs->fmask);
 	if (!ret) {
-		pcs->fshift = ffs(pcs->fmask) - 1;
+		pcs->fshift = __ffs(pcs->fmask);
 		pcs->fmax = pcs->fmask >> pcs->fshift;
 	} else {
 		/* If mask property doesn't exist, function mux is invalid. */
@@ -2025,7 +2043,18 @@ static struct platform_driver pcs_driver = {
 #endif
 };
 
-module_platform_driver(pcs_driver);
+static int __init pinctrl_single_init(void)
+{
+	return platform_driver_register(&pcs_driver);
+}
+
+static void __exit pinctrl_single_exit(void)
+{
+	platform_driver_unregister(&pcs_driver);
+}
+
+arch_initcall(pinctrl_single_init);
+module_exit(pinctrl_single_exit);
 
 MODULE_AUTHOR("Tony Lindgren <tony@atomide.com>");
 MODULE_DESCRIPTION("One-register-per-pin type device tree based pinctrl driver");

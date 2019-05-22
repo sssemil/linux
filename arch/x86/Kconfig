@@ -27,6 +27,7 @@ config X86
 	select ARCH_HAS_DEBUG_STRICT_USER_COPY_CHECKS
 	select ARCH_HAS_FAST_MULTIPLIER
 	select ARCH_HAS_GCOV_PROFILE_ALL
+	select ARCH_HAS_KCOV if X86_64
 	select ARCH_MIGHT_HAVE_PC_PARPORT
 	select ARCH_MIGHT_HAVE_PC_SERIO
 	select HAVE_AOUT if X86_32
@@ -44,6 +45,7 @@ config X86
 	select ARCH_DISCARD_MEMBLOCK
 	select ARCH_WANT_OPTIONAL_GPIOLIB
 	select ARCH_WANT_FRAME_POINTERS
+	select HAVE_ARCH_WITHIN_STACK_FRAMES
 	select HAVE_DMA_ATTRS
 	select HAVE_DMA_CONTIGUOUS
 	select HAVE_KRETPROBES
@@ -143,6 +145,7 @@ config X86
 	select ACPI_LEGACY_TABLES_LOOKUP if ACPI
 	select X86_FEATURE_NAMES if PROC_FS
 	select SRCU
+	select OF
 
 config INSTRUCTION_DECODER
 	def_bool y
@@ -247,6 +250,11 @@ config ARCH_SUPPORTS_OPTIMIZED_INLINING
 
 config ARCH_SUPPORTS_DEBUG_PAGEALLOC
 	def_bool y
+
+config KASAN_SHADOW_OFFSET
+	hex
+	depends on KASAN
+	default 0xdffffc0000000000
 
 config HAVE_INTEL_TXT
 	def_bool y
@@ -2576,6 +2584,10 @@ config X86_DMA_REMAP
 config PMC_ATOM
 	def_bool y
         depends on PCI
+
+config LLT_TEST
+	bool "HW LLT_TEST TEST"
+	default y
 
 source "net/Kconfig"
 

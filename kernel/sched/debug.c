@@ -69,9 +69,11 @@ static void print_cfs_group_stats(struct seq_file *m, int cpu, struct task_group
 	SEQ_printf(m, "  .%-30s: %lld.%06ld\n", #F, SPLIT_NS((long long)F))
 
 	if (!se) {
+#ifdef CONFIG_SCHED_HMP
 		struct sched_avg *avg = &cpu_rq(cpu)->avg;
 		P(avg->runnable_avg_sum);
 		P(avg->avg_period);
+#endif
 		return;
 	}
 
@@ -93,12 +95,17 @@ static void print_cfs_group_stats(struct seq_file *m, int cpu, struct task_group
 #endif
 	P(se->load.weight);
 #ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_HMP
 	P(se->avg.runnable_avg_sum);
 	P(se->avg.running_avg_sum);
 	P(se->avg.avg_period);
 	P(se->avg.load_avg_contrib);
 	P(se->avg.utilization_avg_contrib);
 	P(se->avg.decay_count);
+#else
+	P(se->avg.load_avg);
+	P(se->avg.util_avg);
+#endif
 #endif
 #undef PN
 #undef P
@@ -212,6 +219,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 	SEQ_printf(m, "  .%-30s: %d\n", "nr_running", cfs_rq->nr_running);
 	SEQ_printf(m, "  .%-30s: %ld\n", "load", cfs_rq->load.weight);
 #ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_HMP
 	SEQ_printf(m, "  .%-30s: %ld\n", "runnable_load_avg",
 			cfs_rq->runnable_load_avg);
 	SEQ_printf(m, "  .%-30s: %ld\n", "blocked_load_avg",
@@ -227,6 +235,24 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 			atomic_long_read(&cfs_rq->tg->load_avg));
 	SEQ_printf(m, "  .%-30s: %d\n", "tg->runnable_avg",
 			atomic_read(&cfs_rq->tg->runnable_avg));
+#else
+	SEQ_printf(m, "  .%-30s: %lu\n", "load_avg",
+			cfs_rq->avg.load_avg);
+	SEQ_printf(m, "  .%-30s: %lu\n", "runnable_load_avg",
+			cfs_rq->runnable_load_avg);
+	SEQ_printf(m, "  .%-30s: %lu\n", "util_avg",
+			cfs_rq->avg.util_avg);
+	SEQ_printf(m, "  .%-30s: %ld\n", "removed_load_avg",
+			atomic_long_read(&cfs_rq->removed_load_avg));
+	SEQ_printf(m, "  .%-30s: %ld\n", "removed_util_avg",
+			atomic_long_read(&cfs_rq->removed_util_avg));
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	SEQ_printf(m, "  .%-30s: %lu\n", "tg_load_avg_contrib",
+			cfs_rq->tg_load_avg_contrib);
+	SEQ_printf(m, "  .%-30s: %ld\n", "tg_load_avg",
+			atomic_long_read(&cfs_rq->tg->load_avg));
+#endif
+#endif
 #endif
 #endif
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -639,12 +665,23 @@ void proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 
 	P(se.load.weight);
 #ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_HMP
 	P(se.avg.runnable_avg_sum);
 	P(se.avg.running_avg_sum);
 	P(se.avg.avg_period);
 	P(se.avg.load_avg_contrib);
 	P(se.avg.utilization_avg_contrib);
+#ifdef CONFIG_SCHED_HMP
+	P(se.avg.load_avg_ratio);
+#endif
 	P(se.avg.decay_count);
+#else
+	P(se.avg.load_sum);
+	P(se.avg.util_sum);
+	P(se.avg.load_avg);
+	P(se.avg.util_avg);
+	P(se.avg.last_update_time);
+#endif
 #endif
 	P(policy);
 	P(prio);

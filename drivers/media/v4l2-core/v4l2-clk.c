@@ -169,11 +169,11 @@ unsigned long v4l2_clk_get_rate(struct v4l2_clk *clk)
 	int ret;
 
 	if (clk->clk)
-		return clk_get_rate(clk->clk);
+		return clk_get_rate(clk->clk);/* [false alarm]:original code */
 
 	ret = v4l2_clk_lock_driver(clk);
 	if (ret < 0)
-		return ret;
+		return ret;/* [false alarm]:original code */
 
 	mutex_lock(&clk->lock);
 	if (!clk->ops->get_rate)
@@ -184,7 +184,7 @@ unsigned long v4l2_clk_get_rate(struct v4l2_clk *clk)
 
 	v4l2_clk_unlock_driver(clk);
 
-	return ret;
+	return ret;/* [false alarm]:original code */
 }
 EXPORT_SYMBOL(v4l2_clk_get_rate);
 

@@ -39,6 +39,10 @@
 #include "dummy.h"
 #include "internal.h"
 
+#ifdef CONFIG_HISI_REGULATOR_TRACE
+#include "hisi_regulator_debug.h"
+#endif
+
 #define rdev_crit(rdev, fmt, ...)					\
 	pr_crit("%s: " fmt, rdev_get_name(rdev), ##__VA_ARGS__)
 #define rdev_err(rdev, fmt, ...)					\
@@ -59,6 +63,10 @@ static bool has_full_constraints;
 
 static struct dentry *debugfs_root;
 
+struct list_head *get_regulator_list(void)
+{
+	return &regulator_list;
+}
 /*
  * struct regulator_map
  *
@@ -98,6 +106,7 @@ struct regulator_supply_alias {
 };
 
 static int _regulator_is_enabled(struct regulator_dev *rdev);
+static int _regulator_enable(struct regulator_dev *rdev);
 static int _regulator_disable(struct regulator_dev *rdev);
 static int _regulator_get_voltage(struct regulator_dev *rdev);
 static int _regulator_get_current_limit(struct regulator_dev *rdev);
@@ -109,6 +118,11 @@ static int _regulator_do_set_voltage(struct regulator_dev *rdev,
 static struct regulator *create_regulator(struct regulator_dev *rdev,
 					  struct device *dev,
 					  const char *supply_name);
+
+static struct regulator_dev *dev_to_rdev(struct device *dev)
+{
+	return container_of(dev, struct regulator_dev, dev);
+}
 
 static const char *rdev_get_name(struct regulator_dev *rdev)
 {
@@ -134,7 +148,8 @@ static bool have_full_constraints(void)
  * returns the device node corresponding to the regulator if found, else
  * returns NULL.
  */
-static struct device_node *of_get_regulator(struct device *dev, const char *supply)
+static struct device_node *of_get_regulator(struct device *dev,
+		const char *supply)
 {
 	struct device_node *regnode = NULL;
 	char prop_name[32]; /* 32 is max size of property name */
@@ -313,7 +328,57 @@ static ssize_t regulator_uV_show(struct device *dev,
 
 	return ret;
 }
-static DEVICE_ATTR(microvolts, 0444, regulator_uV_show, NULL);
+
+
+#define LDO15_MAX_UV           (3000000)
+#define LDO15_MIN_UV           (2700000)
+static ssize_t regulator_uV_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct regulator_dev *rdev = NULL;
+	int max_uV = 0;
+	int min_uV = 0;
+	const char *dev_name = NULL;
+	int ret = 0;
+
+	if (!strstr(saved_command_line, "androidboot.swtype=factory")) {
+		pr_info("%s: not in factory mode\n", __func__);
+		return count;
+	}
+	rdev = dev_get_drvdata(dev);
+	if (rdev == NULL) {
+		pr_err("%s: dev_det_drvdata fail, rdev == NULL\n", __func__);
+		return -ENOMEM;
+	}
+	dev_name = rdev_get_name(rdev);
+	if (dev_name == NULL) {
+		pr_err("%s: rdev_get_name fail, dev_name == NULL\n", __func__);
+		return -ENOMEM;
+	}
+	if (strncmp(dev_name, "ldo15", strlen("ldo15"))) {
+		pr_err("error: can change %s volts\n", dev_name);
+		return -EINVAL;
+	}
+
+	ret = sscanf(buf, "%7d,%7d", &min_uV, &max_uV);
+	if (ret < 0) {
+		pr_err("%s: get argument fail.\n", __func__);
+		return -EINVAL;
+	}
+	pr_info("%s: min_uv: %d, max_uv: %d\n", __func__, min_uV, max_uV);
+	if ((min_uV > max_uV) || (min_uV < LDO15_MIN_UV) ||
+			(max_uV > LDO15_MAX_UV)) {
+		pr_err("%s: input argument is invaild!\n", __func__);
+		return -EINVAL;
+	}
+	mutex_lock(&rdev->mutex);
+
+	_regulator_do_set_voltage(rdev, min_uV, max_uV);
+	mutex_unlock(&rdev->mutex);
+	return count;
+}
+
+static DEVICE_ATTR(microvolts, 0644, regulator_uV_show, regulator_uV_store);
 
 static ssize_t regulator_uA_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
@@ -339,10 +404,12 @@ static ssize_t regulator_print_opmode(char *buf, int mode)
 	case REGULATOR_MODE_FAST:
 		return sprintf(buf, "fast\n");
 	case REGULATOR_MODE_NORMAL:
+		//cppcheck-suppress *
 		return sprintf(buf, "normal\n");
 	case REGULATOR_MODE_IDLE:
 		return sprintf(buf, "idle\n");
 	case REGULATOR_MODE_STANDBY:
+		//cppcheck-suppress *
 		return sprintf(buf, "standby\n");
 	}
 	return sprintf(buf, "unknown\n");
@@ -379,7 +446,49 @@ static ssize_t regulator_state_show(struct device *dev,
 
 	return ret;
 }
-static DEVICE_ATTR(state, 0444, regulator_state_show, NULL);
+
+static ssize_t regulator_state_set(struct device *dev,
+				   struct device_attribute *attr, char *buf,
+				   size_t count)
+{
+	struct regulator_dev *rdev = dev_get_drvdata(dev);
+	long val;
+
+	if (kstrtol(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	rdev_info(rdev, "regulator state is: %ld\n", val);
+
+	if (NULL != strstr(saved_command_line, "androidboot.swtype=factory")) {
+		if ((1 == val) && (!_regulator_is_enabled(rdev))) {
+			mutex_lock(&rdev->mutex);
+			_regulator_enable(rdev);
+			mutex_unlock(&rdev->mutex);
+		}
+		if ((0 == val) && (_regulator_is_enabled(rdev))) {
+			mutex_lock(&rdev->mutex);
+			_regulator_disable(rdev);
+			mutex_unlock(&rdev->mutex);
+		}
+		return count;
+	#ifdef CONFIG_HISI_PMIC_DEBUG
+	} else if (NULL != strstr(saved_command_line, "androidboot.swtype=normal")) {
+		if (1 == val) {
+			mutex_lock(&rdev->mutex);
+			_regulator_enable(rdev);
+			mutex_unlock(&rdev->mutex);
+		} else if (0 == val) {
+			mutex_lock(&rdev->mutex);
+			_regulator_disable(rdev);
+			mutex_unlock(&rdev->mutex);
+		}
+		return count;
+	#endif
+	}
+
+	return -EINVAL;
+}
+static DEVICE_ATTR(state, 0644, regulator_state_show, regulator_state_set);
 
 static ssize_t regulator_status_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -495,6 +604,7 @@ static ssize_t num_users_show(struct device *dev, struct device_attribute *attr,
 			      char *buf)
 {
 	struct regulator_dev *rdev = dev_get_drvdata(dev);
+
 	return sprintf(buf, "%d\n", rdev->use_count);
 }
 static DEVICE_ATTR_RO(num_users);
@@ -779,7 +889,7 @@ static int suspend_prepare(struct regulator_dev *rdev, suspend_state_t state)
 static void print_constraints(struct regulator_dev *rdev)
 {
 	struct regulation_constraints *constraints = rdev->constraints;
-	char buf[80] = "";
+	char buf[160] = "";
 	int count = 0;
 	int ret;
 
@@ -851,6 +961,7 @@ static int machine_constraints_voltage(struct regulator_dev *rdev,
 	if (rdev->constraints->apply_uV &&
 	    rdev->constraints->min_uV == rdev->constraints->max_uV) {
 		int current_uV = _regulator_get_voltage(rdev);
+
 		if (current_uV < 0) {
 			rdev_err(rdev,
 				 "failed to get the current voltage(%d)\n",
@@ -1292,15 +1403,14 @@ static struct regulator_dev *regulator_dev_lookup(struct device *dev,
 					return r;
 			*ret = -EPROBE_DEFER;
 			return NULL;
-		} else {
-			/*
-			 * If we couldn't even get the node then it's
-			 * not just that the device didn't register
-			 * yet, there's no node and we'll never
-			 * succeed.
-			 */
-			*ret = -ENODEV;
 		}
+		/*
+		 * If we couldn't even get the node then it's
+		 * not just that the device didn't register
+		 * yet, there's no node and we'll never
+		 * succeed.
+		 */
+		*ret = -ENODEV;
 	}
 
 	/* if not found, try doing it non-dt way */
@@ -1776,9 +1886,8 @@ static void regulator_ena_gpio_free(struct regulator_dev *rdev)
 				kfree(pin);
 				rdev->ena_pin = NULL;
 				return;
-			} else {
-				pin->request_count--;
 			}
+			pin->request_count--;
 		}
 	}
 }
@@ -1988,6 +2097,9 @@ int regulator_enable(struct regulator *regulator)
 
 	mutex_lock(&rdev->mutex);
 	ret = _regulator_enable(rdev);
+#ifdef CONFIG_HISI_REGULATOR_TRACE
+	track_regulator_onoff(rdev, TRACK_ON_OFF);
+#endif
 	mutex_unlock(&rdev->mutex);
 
 	if (ret != 0 && rdev->supply)
@@ -2097,6 +2209,9 @@ int regulator_disable(struct regulator *regulator)
 
 	mutex_lock(&rdev->mutex);
 	ret = _regulator_disable(rdev);
+#ifdef CONFIG_HISI_REGULATOR_TRACE
+	track_regulator_onoff(rdev, TRACK_ON_OFF);
+#endif
 	mutex_unlock(&rdev->mutex);
 
 	if (ret == 0 && rdev->supply)
@@ -2571,7 +2686,7 @@ static int _regulator_do_set_voltage(struct regulator_dev *rdev,
 		if (ret >= 0) {
 			if (rdev->desc->ops->list_voltage)
 				best_val = rdev->desc->ops->list_voltage(rdev,
-									 selector);
+					selector);
 			else
 				best_val = _regulator_get_voltage(rdev);
 		}
@@ -2718,6 +2833,9 @@ int regulator_set_voltage(struct regulator *regulator, int min_uV, int max_uV)
 		goto out2;
 
 out:
+#ifdef CONFIG_HISI_REGULATOR_TRACE
+	track_regulator_set_vol(rdev, TRACK_VOL, max_uV, min_uV);
+#endif
 	mutex_unlock(&rdev->mutex);
 	return ret;
 out2:
@@ -3024,6 +3142,9 @@ int regulator_set_mode(struct regulator *regulator, unsigned int mode)
 		goto out;
 
 	ret = rdev->desc->ops->set_mode(rdev, mode);
+#ifdef CONFIG_HISI_REGULATOR_TRACE
+	track_regulator_set_mode(rdev, TRACK_MODE, mode);
+#endif
 out:
 	mutex_unlock(&rdev->mutex);
 	return ret;
@@ -3045,7 +3166,7 @@ static unsigned int _regulator_get_mode(struct regulator_dev *rdev)
 	ret = rdev->desc->ops->get_mode(rdev);
 out:
 	mutex_unlock(&rdev->mutex);
-	return ret;
+	return ret;/*[false alarm]:return */
 }
 
 /**
@@ -3472,7 +3593,8 @@ static umode_t regulator_attr_is_visible(struct kobject *kobj,
 					 struct attribute *attr, int idx)
 {
 	struct device *dev = kobj_to_dev(kobj);
-	struct regulator_dev *rdev = container_of(dev, struct regulator_dev, dev);
+	struct regulator_dev *rdev = container_of(dev,
+			struct regulator_dev, dev);
 	const struct regulator_ops *ops = rdev->desc->ops;
 	umode_t mode = attr->mode;
 
@@ -3493,32 +3615,32 @@ static umode_t regulator_attr_is_visible(struct kobject *kobj,
 	}
 
 	if (attr == &dev_attr_microamps.attr)
-		return ops->get_current_limit ? mode : 0;
+		return ops->get_current_limit ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_opmode.attr)
-		return ops->get_mode ? mode : 0;
+		return ops->get_mode ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_state.attr)
-		return (rdev->ena_pin || ops->is_enabled) ? mode : 0;
+		return (rdev->ena_pin || ops->is_enabled) ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_status.attr)
-		return ops->get_status ? mode : 0;
+		return ops->get_status ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_bypass.attr)
-		return ops->get_bypass ? mode : 0;
+		return ops->get_bypass ? mode : 0;/*[false alarm]:return */
 
 	/* some attributes are type-specific */
 	if (attr == &dev_attr_requested_microamps.attr)
-		return rdev->desc->type == REGULATOR_CURRENT ? mode : 0;
+		return rdev->desc->type == REGULATOR_CURRENT ? mode : 0;/*[false alarm]:return */
 
 	/* constraints need specific supporting methods */
 	if (attr == &dev_attr_min_microvolts.attr ||
 	    attr == &dev_attr_max_microvolts.attr)
-		return (ops->set_voltage || ops->set_voltage_sel) ? mode : 0;
+		return (ops->set_voltage || ops->set_voltage_sel) ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_min_microamps.attr ||
 	    attr == &dev_attr_max_microamps.attr)
-		return ops->set_current_limit ? mode : 0;
+		return ops->set_current_limit ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_suspend_standby_state.attr ||
 	    attr == &dev_attr_suspend_mem_state.attr ||
@@ -3528,12 +3650,12 @@ static umode_t regulator_attr_is_visible(struct kobject *kobj,
 	if (attr == &dev_attr_suspend_standby_microvolts.attr ||
 	    attr == &dev_attr_suspend_mem_microvolts.attr ||
 	    attr == &dev_attr_suspend_disk_microvolts.attr)
-		return ops->set_suspend_voltage ? mode : 0;
+		return ops->set_suspend_voltage ? mode : 0;/*[false alarm]:return */
 
 	if (attr == &dev_attr_suspend_standby_mode.attr ||
 	    attr == &dev_attr_suspend_mem_mode.attr ||
 	    attr == &dev_attr_suspend_disk_mode.attr)
-		return ops->set_suspend_mode ? mode : 0;
+		return ops->set_suspend_mode ? mode : 0;/*[false alarm]:return */
 
 	return mode;
 }
@@ -3551,6 +3673,7 @@ static const struct attribute_group *regulator_dev_groups[] = {
 static void regulator_dev_release(struct device *dev)
 {
 	struct regulator_dev *rdev = dev_get_drvdata(dev);
+
 	kfree(rdev);
 }
 
@@ -3585,6 +3708,11 @@ static void rdev_init_debugfs(struct regulator_dev *rdev)
 			   &rdev->open_count);
 	debugfs_create_u32("bypass_count", 0444, rdev->debugfs,
 			   &rdev->bypass_count);
+}
+
+static int regulator_register_resolve_supply(struct device *dev, void *data)
+{
+	return regulator_resolve_supply(dev_to_rdev(dev));
 }
 
 /**
@@ -3735,6 +3863,10 @@ regulator_register(const struct regulator_desc *regulator_desc,
 	list_add(&rdev->list, &regulator_list);
 
 	rdev_init_debugfs(rdev);
+
+	/* try to resolve regulators supply since a new one was registered */
+	class_for_each_device(&regulator_class, NULL, NULL,
+			      regulator_register_resolve_supply);
 out:
 	mutex_unlock(&regulator_list_mutex);
 	kfree(config);
@@ -4014,7 +4146,7 @@ static void regulator_summary_show_subtree(struct seq_file *s,
 	seq_puts(s, "\n");
 
 	list_for_each_entry(consumer, &rdev->consumer_list, list) {
-		if (consumer->dev->class == &regulator_class)
+		if (NULL == consumer->dev || consumer->dev->class == &regulator_class)
 			continue;
 
 		seq_printf(s, "%*s%-*s ",
@@ -4104,13 +4236,57 @@ static int __init regulator_init(void)
 /* init early to allow our consumers to complete system booting */
 core_initcall(regulator_init);
 
-static int __init regulator_init_complete(void)
+static int __init regulator_late_cleanup(struct device *dev, void *data)
 {
-	struct regulator_dev *rdev;
-	const struct regulator_ops *ops;
-	struct regulation_constraints *c;
+	struct regulator_dev *rdev = dev_to_rdev(dev);
+	const struct regulator_ops *ops = rdev->desc->ops;
+	struct regulation_constraints *c = rdev->constraints;
 	int enabled, ret;
 
+	if (c && c->always_on)
+		return 0;
+
+	if (c && !(c->valid_ops_mask & REGULATOR_CHANGE_STATUS))
+		return 0;
+
+	mutex_lock(&rdev->mutex);
+
+	if (rdev->use_count)
+		goto unlock;
+
+	/* If we can't read the status assume it's on. */
+	if (ops->is_enabled)
+		enabled = ops->is_enabled(rdev);
+	else
+		enabled = 1;
+
+	if (!enabled)
+		goto unlock;
+
+	if (have_full_constraints()) {
+		/* We log since this may kill the system if it goes
+		 * wrong. */
+		rdev_info(rdev, "disabling\n");
+		ret = _regulator_do_disable(rdev);
+		if (ret != 0)
+			rdev_err(rdev, "couldn't disable: %d\n", ret);
+	} else {
+		/* The intention is that in future we will
+		 * assume that full constraints are provided
+		 * so warn even if we aren't going to do
+		 * anything here.
+		 */
+		rdev_warn(rdev, "incomplete constraints, leaving on\n");
+	}
+
+unlock:
+	mutex_unlock(&rdev->mutex);
+
+	return 0;
+}
+
+static int __init regulator_init_complete(void)
+{
 	/*
 	 * Since DT doesn't provide an idiomatic mechanism for
 	 * enabling full constraints and since it's much more natural
@@ -4120,58 +4296,13 @@ static int __init regulator_init_complete(void)
 	if (of_have_populated_dt())
 		has_full_constraints = true;
 
-	mutex_lock(&regulator_list_mutex);
-
 	/* If we have a full configuration then disable any regulators
 	 * we have permission to change the status for and which are
 	 * not in use or always_on.  This is effectively the default
 	 * for DT and ACPI as they have full constraints.
 	 */
-	list_for_each_entry(rdev, &regulator_list, list) {
-		ops = rdev->desc->ops;
-		c = rdev->constraints;
-
-		if (c && c->always_on)
-			continue;
-
-		if (c && !(c->valid_ops_mask & REGULATOR_CHANGE_STATUS))
-			continue;
-
-		mutex_lock(&rdev->mutex);
-
-		if (rdev->use_count)
-			goto unlock;
-
-		/* If we can't read the status assume it's on. */
-		if (ops->is_enabled)
-			enabled = ops->is_enabled(rdev);
-		else
-			enabled = 1;
-
-		if (!enabled)
-			goto unlock;
-
-		if (have_full_constraints()) {
-			/* We log since this may kill the system if it
-			 * goes wrong. */
-			rdev_info(rdev, "disabling\n");
-			ret = _regulator_do_disable(rdev);
-			if (ret != 0)
-				rdev_err(rdev, "couldn't disable: %d\n", ret);
-		} else {
-			/* The intention is that in future we will
-			 * assume that full constraints are provided
-			 * so warn even if we aren't going to do
-			 * anything here.
-			 */
-			rdev_warn(rdev, "incomplete constraints, leaving on\n");
-		}
-
-unlock:
-		mutex_unlock(&rdev->mutex);
-	}
-
-	mutex_unlock(&regulator_list_mutex);
+	class_for_each_device(&regulator_class, NULL, NULL,
+			      regulator_late_cleanup);
 
 	return 0;
 }

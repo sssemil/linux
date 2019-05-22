@@ -74,6 +74,13 @@ void __init hibernate_image_size_init(void)
  */
 struct pbe *restore_pblist;
 
+#ifdef CONFIG_HIBERNATION
+/* List of PBEs that were restored in place. modified-harvard architectures
+ * need to 'clean' these pages before they can be executed.
+ */
+struct pbe *restored_inplace_pblist;
+#endif
+
 /* Pointer to an auxiliary buffer (1 page) */
 static void *buffer;
 
@@ -1359,6 +1366,9 @@ out:
 	nr_copy_pages = 0;
 	nr_meta_pages = 0;
 	restore_pblist = NULL;
+#ifdef CONFIG_HIBERNATION
+	restored_inplace_pblist = NULL;
+#endif
 	buffer = NULL;
 	alloc_normal = 0;
 	alloc_highmem = 0;
@@ -2072,6 +2082,9 @@ load_header(struct swsusp_info *info)
 	int error;
 
 	restore_pblist = NULL;
+#ifdef CONFIG_HIBERNATION
+	restored_inplace_pblist = NULL;
+#endif
 	error = check_header(info);
 	if (!error) {
 		nr_copy_pages = info->image_pages;
@@ -2427,12 +2440,13 @@ static void *get_buffer(struct memory_bitmap *bm, struct chain_allocator *ca)
 	if (PageHighMem(page))
 		return get_highmem_page_buffer(page, ca);
 
+#ifndef CONFIG_HIBERNATION
 	if (swsusp_page_is_forbidden(page) && swsusp_page_is_free(page))
 		/* We have allocated the "original" page frame and we can
 		 * use it directly to store the loaded page.
 		 */
 		return page_address(page);
-
+#endif
 	/* The "original" page frame has not been allocated and we have to
 	 * use a "safe" page frame to store the loaded page.
 	 */
@@ -2441,11 +2455,32 @@ static void *get_buffer(struct memory_bitmap *bm, struct chain_allocator *ca)
 		swsusp_free();
 		return ERR_PTR(-ENOMEM);
 	}
+#ifndef CONFIG_HIBERNATION
 	pbe->orig_address = page_address(page);
 	pbe->address = safe_pages_list;
 	safe_pages_list = safe_pages_list->next;
 	pbe->next = restore_pblist;
 	restore_pblist = pbe;
+#else
+	if (swsusp_page_is_forbidden(page) && swsusp_page_is_free(page)) {
+		/* We have allocated the "original" page frame and we can
+		 * use it directly to store the loaded page.
+		 */
+		pbe->orig_address = NULL;
+		pbe->address = page_address(page);
+		pbe->next = restored_inplace_pblist;
+		restored_inplace_pblist = pbe;
+	} else {
+		/* The "original" page frame has not been allocated and we
+		 * have to use a "safe" page frame to store the loaded page.
+		 */
+		pbe->orig_address = page_address(page);
+		pbe->address = safe_pages_list;
+		safe_pages_list = safe_pages_list->next;
+		pbe->next = restore_pblist;
+		restore_pblist = pbe;
+	}
+#endif
 	return pbe->address;
 }
 
@@ -2513,6 +2548,9 @@ int snapshot_write_next(struct snapshot_handle *handle)
 			chain_init(&ca, GFP_ATOMIC, PG_SAFE);
 			memory_bm_position_reset(&orig_bm);
 			restore_pblist = NULL;
+#ifdef CONFIG_HIBERNATION
+			restored_inplace_pblist = NULL;
+#endif
 			handle->buffer = get_buffer(&orig_bm, &ca);
 			handle->sync_read = 0;
 			if (IS_ERR(handle->buffer))

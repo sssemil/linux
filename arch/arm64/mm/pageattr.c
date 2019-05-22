@@ -44,18 +44,22 @@ static int change_memory_common(unsigned long addr, int numpages,
 	unsigned long end = start + size;
 	int ret;
 	struct page_change_data data;
-
 	if (!IS_ALIGNED(addr, PAGE_SIZE)) {
 		start &= PAGE_MASK;
 		end = start + size;
 		WARN_ON_ONCE(1);
 	}
 
+#ifndef CONFIG_FREE_PAGES_RDONLY
 	if (start < MODULES_VADDR || start >= MODULES_END)
 		return -EINVAL;
 
 	if (end < MODULES_VADDR || end >= MODULES_END)
 		return -EINVAL;
+#endif
+
+	if (!numpages)
+		return 0;
 
 	data.set_mask = set_mask;
 	data.clear_mask = clear_mask;

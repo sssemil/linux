@@ -274,6 +274,13 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	WARN_ON_ONCE(!blk_get_queue(sdev->request_queue));
 	sdev->request_queue->queuedata = sdev;
 
+#ifdef CONFIG_SCSI_UFS_INLINE_CRYPTO
+	if (sdev->host->crypto_enabled && !scsi_is_wlun(lun))
+		blk_queue_set_crypto_flag(sdev->request_queue);
+	else
+		blk_queue_clr_crypto_flag(sdev->request_queue);
+#endif
+
 	if (!shost_use_blk_mq(sdev->host) &&
 	    (shost->bqt || shost->hostt->use_blk_tags)) {
 		blk_queue_init_tags(sdev->request_queue,
@@ -953,6 +960,8 @@ static int scsi_add_lun(struct scsi_device *sdev, unsigned char *inq_result,
 
 	if (*bflags & BLIST_RETRY_HWERROR)
 		sdev->retry_hwerror = 1;
+	if (*bflags & BLIST_RESET_HWERROR) /*lint !e737*/
+		sdev->reset_hwerror = 1;
 
 	if (*bflags & BLIST_NO_DIF)
 		sdev->no_dif = 1;
@@ -965,6 +974,10 @@ static int scsi_add_lun(struct scsi_device *sdev, unsigned char *inq_result,
 		sdev->skip_vpd_pages = 1;
 
 	transport_configure_device(&sdev->sdev_gendev);
+
+	/* The LLD can override auto suspend tunables in ->slave_configure() */
+	sdev->use_rpm_auto = 0;
+	sdev->autosuspend_delay = SCSI_DEFAULT_AUTOSUSPEND_DELAY;
 
 	if (sdev->host->hostt->slave_configure) {
 		ret = sdev->host->hostt->slave_configure(sdev);

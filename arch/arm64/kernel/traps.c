@@ -39,6 +39,10 @@
 #include <asm/exception.h>
 #include <asm/system_misc.h>
 
+#ifdef CONFIG_HISI_BB
+#include <linux/hisi/rdr_hisi_platform.h>
+#endif
+
 static const char *handler[]= {
 	"Synchronous Abort",
 	"IRQ",
@@ -81,7 +85,7 @@ static void dump_mem(const char *lvl, const char *str, unsigned long bottom,
 				if (__get_user(val, (unsigned int *)p) == 0)
 					sprintf(str + i * 9, " %08x", val);
 				else
-					sprintf(str + i * 9, " ????????");
+					sprintf(str + i * 9, " ????????");//lint !e585
 			}
 		}
 		printk("%s%04lx:%s\n", lvl, first & 0xffff, str);
@@ -119,7 +123,7 @@ static void dump_instr(const char *lvl, struct pt_regs *regs)
 		bad = __get_user(val, &((u32 *)addr)[i]);
 
 		if (!bad)
-			p += sprintf(p, i == 0 ? "(%08x) " : "%08x ", val);
+			p += sprintf(p, i == 0 ? "(%08x) " : "%08x ", val); /*[false alarm]:fortify */
 		else {
 			p += sprintf(p, "bad PC value");
 			break;
@@ -179,11 +183,7 @@ void show_stack(struct task_struct *tsk, unsigned long *sp)
 #else
 #define S_PREEMPT ""
 #endif
-#ifdef CONFIG_SMP
 #define S_SMP " SMP"
-#else
-#define S_SMP ""
-#endif
 
 static int __die(const char *str, int err, struct thread_info *thread,
 		 struct pt_regs *regs)
@@ -225,11 +225,18 @@ void die(const char *str, struct pt_regs *regs, int err)
 	struct thread_info *thread = current_thread_info();
 	int ret;
 
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+	printk_level_setup(LOGLEVEL_DEBUG);
+#endif
+
 	oops_enter();
 
 	raw_spin_lock_irq(&die_lock);
 	console_verbose();
 	bust_spinlocks(1);
+#ifdef CONFIG_HISI_BB
+	set_exception_info(instruction_pointer(regs));
+#endif
 	ret = __die(str, err, thread, regs);
 
 	if (regs && kexec_should_crash(thread->task))
@@ -246,6 +253,9 @@ void die(const char *str, struct pt_regs *regs, int err)
 		panic("Fatal exception");
 	if (ret != NOTIFY_STOP)
 		do_exit(SIGSEGV);
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+	printk_level_setup(sysctl_printk_level);
+#endif
 }
 
 void arm64_notify_die(const char *str, struct pt_regs *regs,
@@ -337,9 +347,15 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 
 	if (show_unhandled_signals && unhandled_signal(current, SIGILL) &&
 	    printk_ratelimit()) {
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+		printk_level_setup(LOGLEVEL_DEBUG);
+#endif
 		pr_info("%s[%d]: undefined instruction: pc=%p\n",
 			current->comm, task_pid_nr(current), pc);
 		dump_instr(KERN_INFO, regs);
+#ifdef CONFIG_HUAWEI_PRINTK_CTRL
+		printk_level_setup(sysctl_printk_level);
+#endif
 	}
 
 	info.si_signo = SIGILL;

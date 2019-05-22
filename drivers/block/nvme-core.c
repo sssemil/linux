@@ -590,6 +590,7 @@ static void req_completion(struct nvme_queue *nvmeq, void *ctx,
 	struct nvme_iod *iod = ctx;
 	struct request *req = iod_get_private(iod);
 	struct nvme_cmd_info *cmd_rq = blk_mq_rq_to_pdu(req);
+	bool requeue = false;
 
 	u16 status = le16_to_cpup(&cqe->status) >> 1;
 
@@ -598,12 +599,13 @@ static void req_completion(struct nvme_queue *nvmeq, void *ctx,
 		    && (jiffies - req->start_time) < req->timeout) {
 			unsigned long flags;
 
+			requeue = true;
 			blk_mq_requeue_request(req);
 			spin_lock_irqsave(req->q->queue_lock, flags);
 			if (!blk_queue_stopped(req->q))
 				blk_mq_kick_requeue_list(req->q);
 			spin_unlock_irqrestore(req->q->queue_lock, flags);
-			return;
+			goto release_iod;
 		}
 		req->errors = nvme_error_status(status);
 	} else
@@ -613,7 +615,7 @@ static void req_completion(struct nvme_queue *nvmeq, void *ctx,
 		dev_warn(&nvmeq->dev->pci_dev->dev,
 			"completing aborted command with status:%04x\n",
 			status);
-
+ release_iod:
 	if (iod->nents) {
 		dma_unmap_sg(&nvmeq->dev->pci_dev->dev, iod->sg, iod->nents,
 			rq_data_dir(req) ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
@@ -626,7 +628,8 @@ static void req_completion(struct nvme_queue *nvmeq, void *ctx,
 	}
 	nvme_free_iod(nvmeq->dev, iod);
 
-	blk_mq_complete_request(req);
+	if (likely(!requeue))
+		blk_mq_complete_request(req);
 }
 
 /* length is in bytes.  gfp flags indicates whether we may sleep. */
@@ -1979,7 +1982,7 @@ static void nvme_config_discard(struct nvme_ns *ns)
 	ns->queue->limits.discard_zeroes_data = 0;
 	ns->queue->limits.discard_alignment = logical_block_size;
 	ns->queue->limits.discard_granularity = logical_block_size;
-	ns->queue->limits.max_discard_sectors = 0xffffffff;
+	blk_queue_max_discard_sectors(ns->queue, 0xffffffff);
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, ns->queue);
 }
 
@@ -2135,7 +2138,7 @@ static void nvme_alloc_ns(struct nvme_dev *dev, unsigned nsid)
 	if (dev->stripe_size)
 		blk_queue_chunk_sectors(ns->queue, dev->stripe_size >> 9);
 	if (dev->vwc & NVME_CTRL_VWC_PRESENT)
-		blk_queue_flush(ns->queue, REQ_FLUSH | REQ_FUA);
+		blk_queue_write_cache(ns->queue, true, true);
 
 	disk->major = nvme_major;
 	disk->first_minor = 0;

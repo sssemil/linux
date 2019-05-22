@@ -65,6 +65,11 @@
 #include <linux/freezer.h>
 #include <linux/bootmem.h>
 
+#ifdef CONFIG_FUTEX_DEBUG
+#define CREATE_TRACE_POINTS
+#include <trace/events/futex.h>
+#endif
+
 #include <asm/futex.h>
 
 #include "locking/rtmutex_common.h"
@@ -1157,10 +1162,20 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_q *this)
 	 */
 	newval = FUTEX_WAITERS | task_pid_vnr(new_owner);
 
-	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval))
+	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval)) {
 		ret = -EFAULT;
-	else if (curval != uval)
-		ret = -EINVAL;
+	} else if (curval != uval) {
+		/*
+		 * If a unconditional UNLOCK_PI operation (user space did not
+		 * try the TID->0 transition) raced with a waiter setting the
+		 * FUTEX_WAITERS flag between get_user() and locking the hash
+		 * bucket lock, retry the operation.
+		 */
+		if ((FUTEX_TID_MASK & curval) == uval)
+			ret = -EAGAIN;
+		else
+			ret = -EINVAL;
+	}
 	if (ret) {
 		raw_spin_unlock(&pi_state->pi_mutex.wait_lock);
 		return ret;
@@ -1371,8 +1386,8 @@ void requeue_futex(struct futex_q *q, struct futex_hash_bucket *hb1,
 	if (likely(&hb1->chain != &hb2->chain)) {
 		plist_del(&q->list, &hb1->chain);
 		hb_waiters_dec(hb1);
-		plist_add(&q->list, &hb2->chain);
 		hb_waiters_inc(hb2);
+		plist_add(&q->list, &hb2->chain);
 		q->lock_ptr = &hb2->lock;
 	}
 	get_futex_key_refs(key2);
@@ -2419,6 +2434,15 @@ retry:
 		 */
 		if (ret == -EFAULT)
 			goto pi_faulted;
+		/*
+		 * A unconditional UNLOCK_PI op raced against a waiter
+		 * setting the FUTEX_WAITERS bit. Try again.
+		 */
+		if (ret == -EAGAIN) {
+			spin_unlock(&hb->lock);
+			put_futex_key(&key);
+			goto retry;
+		}
 		goto out_unlock;
 	}
 
@@ -2632,6 +2656,11 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		if (q.pi_state && (q.pi_state->owner != current)) {
 			spin_lock(q.lock_ptr);
 			ret = fixup_pi_state_owner(uaddr2, &q, current);
+			/*
+			 * Drop the reference to the pi state which
+			 * the requeue_pi() code acquired for us.
+			 */
+			free_pi_state(q.pi_state);
 			spin_unlock(q.lock_ptr);
 		}
 	} else {
@@ -2758,7 +2787,7 @@ SYSCALL_DEFINE3(get_robust_list, int, pid,
 	}
 
 	ret = -EPERM;
-	if (!ptrace_may_access(p, PTRACE_MODE_READ))
+	if (!ptrace_may_access(p, PTRACE_MODE_READ_REALCREDS))
 		goto err_unlock;
 
 	head = p->robust_list;
@@ -2917,7 +2946,7 @@ long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
 {
 	int cmd = op & FUTEX_CMD_MASK;
 	unsigned int flags = 0;
-
+	long ret = -ENOSYS;
 	if (!(op & FUTEX_PRIVATE_FLAG))
 		flags |= FLAGS_SHARED;
 
@@ -2936,36 +2965,53 @@ long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
 		if (!futex_cmpxchg_enabled)
 			return -ENOSYS;
 	}
+#ifdef CONFIG_FUTEX_DEBUG
+	trace_futex_enter(op, cmd, uaddr);
+#endif
 
 	switch (cmd) {
 	case FUTEX_WAIT:
 		val3 = FUTEX_BITSET_MATCH_ANY;
 	case FUTEX_WAIT_BITSET:
-		return futex_wait(uaddr, flags, val, timeout, val3);
+		ret = futex_wait(uaddr, flags, val, timeout, val3);
+		break;
 	case FUTEX_WAKE:
 		val3 = FUTEX_BITSET_MATCH_ANY;
 	case FUTEX_WAKE_BITSET:
-		return futex_wake(uaddr, flags, val, val3);
+		ret = futex_wake(uaddr, flags, val, val3);
+		break;
 	case FUTEX_REQUEUE:
-		return futex_requeue(uaddr, flags, uaddr2, val, val2, NULL, 0);
+		ret = futex_requeue(uaddr, flags, uaddr2, val, val2, NULL, 0);
+		break;
 	case FUTEX_CMP_REQUEUE:
-		return futex_requeue(uaddr, flags, uaddr2, val, val2, &val3, 0);
+		ret = futex_requeue(uaddr, flags, uaddr2, val, val2, &val3, 0);
+		break;
 	case FUTEX_WAKE_OP:
-		return futex_wake_op(uaddr, flags, uaddr2, val, val2, val3);
+		ret = futex_wake_op(uaddr, flags, uaddr2, val, val2, val3);
+		break;
 	case FUTEX_LOCK_PI:
-		return futex_lock_pi(uaddr, flags, timeout, 0);
+		ret = futex_lock_pi(uaddr, flags, timeout, 0);
+		break;
 	case FUTEX_UNLOCK_PI:
-		return futex_unlock_pi(uaddr, flags);
+		ret = futex_unlock_pi(uaddr, flags);
+		break;
 	case FUTEX_TRYLOCK_PI:
-		return futex_lock_pi(uaddr, flags, NULL, 1);
+		ret = futex_lock_pi(uaddr, flags, NULL, 1);
+		break;
 	case FUTEX_WAIT_REQUEUE_PI:
 		val3 = FUTEX_BITSET_MATCH_ANY;
-		return futex_wait_requeue_pi(uaddr, flags, val, timeout, val3,
+		ret = futex_wait_requeue_pi(uaddr, flags, val, timeout, val3,
 					     uaddr2);
+		break;
 	case FUTEX_CMP_REQUEUE_PI:
-		return futex_requeue(uaddr, flags, uaddr2, val, val2, &val3, 1);
+		ret = futex_requeue(uaddr, flags, uaddr2, val, val2, &val3, 1);
+		break;
 	}
-	return -ENOSYS;
+
+#ifdef CONFIG_FUTEX_DEBUG
+	trace_futex_exit(op, cmd, uaddr);
+#endif
+	return ret;
 }
 
 

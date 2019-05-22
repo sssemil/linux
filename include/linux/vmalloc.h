@@ -4,8 +4,13 @@
 #include <linux/spinlock.h>
 #include <linux/init.h>
 #include <linux/list.h>
+#include <linux/llist.h>
 #include <asm/page.h>		/* pgprot_t */
 #include <linux/rbtree.h>
+
+#ifdef CONFIG_DEBUG_VMALLOC
+#include <linux/sched.h>
+#endif
 
 struct vm_area_struct;		/* vma defining user mapping in mm_types.h */
 
@@ -37,6 +42,10 @@ struct vm_struct {
 	unsigned int		nr_pages;
 	phys_addr_t		phys_addr;
 	const void		*caller;
+#ifdef CONFIG_DEBUG_VMALLOC
+	unsigned int		pid;
+	unsigned char		task_name[TASK_COMM_LEN];
+#endif
 };
 
 struct vmap_area {
@@ -45,7 +54,7 @@ struct vmap_area {
 	unsigned long flags;
 	struct rb_node rb_node;         /* address sorted rbtree */
 	struct list_head list;          /* address sorted list */
-	struct list_head purge_list;    /* "lazy purge" list */
+	struct llist_node purge_list;   /* "lazy purge" list */
 	struct vm_struct *vm;
 	struct rcu_head rcu_head;
 };

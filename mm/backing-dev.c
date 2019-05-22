@@ -84,19 +84,19 @@ static int bdi_debug_stats_show(struct seq_file *m, void *v)
 		   "b_dirty_time:       %10lu\n"
 		   "bdi_list:           %10u\n"
 		   "state:              %10lx\n",
-		   (unsigned long) K(bdi_stat(bdi, BDI_WRITEBACK)),
-		   (unsigned long) K(bdi_stat(bdi, BDI_RECLAIMABLE)),
+		   (unsigned long) K(wb_stat(wb, WB_WRITEBACK)),
+		   (unsigned long) K(wb_stat(wb, WB_RECLAIMABLE)),
 		   K(bdi_thresh),
 		   K(dirty_thresh),
 		   K(background_thresh),
-		   (unsigned long) K(bdi_stat(bdi, BDI_DIRTIED)),
-		   (unsigned long) K(bdi_stat(bdi, BDI_WRITTEN)),
+		   (unsigned long) K(wb_stat(wb, WB_DIRTIED)),
+		   (unsigned long) K(wb_stat(wb, WB_WRITTEN)),
 		   (unsigned long) K(bdi->write_bandwidth),
 		   nr_dirty,
 		   nr_io,
 		   nr_more_io,
 		   nr_dirty_time,
-		   !list_empty(&bdi->bdi_list), bdi->state);
+		   !list_empty(&bdi->bdi_list), bdi->wb.state);
 #undef K
 
 	return 0;
@@ -280,7 +280,7 @@ void bdi_wakeup_thread_delayed(struct backing_dev_info *bdi)
 
 	timeout = msecs_to_jiffies(dirty_writeback_interval * 10);
 	spin_lock_bh(&bdi->wb_lock);
-	if (test_bit(BDI_registered, &bdi->state))
+	if (test_bit(WB_registered, &bdi->wb.state))
 		queue_delayed_work(bdi_wq, &bdi->wb.dwork, timeout);
 	spin_unlock_bh(&bdi->wb_lock);
 }
@@ -315,7 +315,7 @@ int bdi_register(struct backing_dev_info *bdi, struct device *parent,
 	bdi->dev = dev;
 
 	bdi_debug_register(bdi, dev_name(dev));
-	set_bit(BDI_registered, &bdi->state);
+	set_bit(WB_registered, &bdi->wb.state);
 
 	spin_lock_bh(&bdi_lock);
 	list_add_tail_rcu(&bdi->bdi_list, &bdi_list);
@@ -339,7 +339,7 @@ static void bdi_wb_shutdown(struct backing_dev_info *bdi)
 {
 	/* Make sure nobody queues further work */
 	spin_lock_bh(&bdi->wb_lock);
-	if (!test_and_clear_bit(BDI_registered, &bdi->state)) {
+	if (!test_and_clear_bit(WB_registered, &bdi->wb.state)) {
 		spin_unlock_bh(&bdi->wb_lock);
 		return;
 	}
@@ -359,8 +359,33 @@ static void bdi_wb_shutdown(struct backing_dev_info *bdi)
 	flush_delayed_work(&bdi->wb.dwork);
 }
 
-static void bdi_wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi)
+/*
+ * Called when the device behind @bdi has been removed or ejected.
+ *
+ * We can't really do much here except for reducing the dirty ratio at
+ * the moment.  In the future we should be able to set a flag so that
+ * the filesystem can handle errors at mark_inode_dirty time instead
+ * of only at writeback time.
+ */
+void bdi_unregister(struct backing_dev_info *bdi)
 {
+	bdi_wb_shutdown(bdi);
+	bdi_set_min_ratio(bdi, 0);
+
+	WARN_ON(!list_empty(&bdi->work_list));
+
+	if (bdi->dev) {
+		bdi_debug_unregister(bdi);
+		device_unregister(bdi->dev);
+		bdi->dev = NULL;
+	}
+}
+EXPORT_SYMBOL(bdi_unregister);
+
+static int bdi_wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi)
+{
+	int i, err;
+
 	memset(wb, 0, sizeof(*wb));
 
 	wb->bdi = bdi;
@@ -371,6 +396,28 @@ static void bdi_wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi)
 	INIT_LIST_HEAD(&wb->b_dirty_time);
 	spin_lock_init(&wb->list_lock);
 	INIT_DELAYED_WORK(&wb->dwork, bdi_writeback_workfn);
+	atomic_set(&wb->dirty_sleeping, 0);
+
+	for (i = 0; i < NR_WB_STAT_ITEMS; i++) {
+		err = percpu_counter_init(&wb->stat[i], 0, GFP_KERNEL);
+		if (err) {
+			while (--i)
+				percpu_counter_destroy(&wb->stat[i]);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+static void bdi_wb_exit(struct bdi_writeback *wb)
+{
+	int i;
+
+	WARN_ON(delayed_work_pending(&wb->dwork));
+
+	for (i = 0; i < NR_WB_STAT_ITEMS; i++)
+		percpu_counter_destroy(&wb->stat[i]);
 }
 
 /*
@@ -380,7 +427,7 @@ static void bdi_wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi)
 
 int bdi_init(struct backing_dev_info *bdi)
 {
-	int i, err;
+	int err;
 
 	bdi->dev = NULL;
 
@@ -391,13 +438,9 @@ int bdi_init(struct backing_dev_info *bdi)
 	INIT_LIST_HEAD(&bdi->bdi_list);
 	INIT_LIST_HEAD(&bdi->work_list);
 
-	bdi_wb_init(&bdi->wb, bdi);
-
-	for (i = 0; i < NR_BDI_STAT_ITEMS; i++) {
-		err = percpu_counter_init(&bdi->bdi_stat[i], 0, GFP_KERNEL);
-		if (err)
-			goto err;
-	}
+	err = bdi_wb_init(&bdi->wb, bdi);
+	if (err)
+		return err;
 
 	bdi->dirty_exceeded = 0;
 
@@ -410,36 +453,28 @@ int bdi_init(struct backing_dev_info *bdi)
 	bdi->avg_write_bandwidth = INIT_BW;
 
 	err = fprop_local_init_percpu(&bdi->completions, GFP_KERNEL);
-
 	if (err) {
-err:
-		while (i--)
-			percpu_counter_destroy(&bdi->bdi_stat[i]);
+		bdi_wb_exit(&bdi->wb);
+		return err;
 	}
 
-	return err;
+	return 0;
 }
 EXPORT_SYMBOL(bdi_init);
 
+void bdi_exit(struct backing_dev_info *bdi)
+{
+	WARN_ON_ONCE(bdi->dev);
+
+	bdi_wb_exit(&bdi->wb);
+	fprop_local_destroy_percpu(&bdi->completions);
+}
+EXPORT_SYMBOL(bdi_exit);
+
 void bdi_destroy(struct backing_dev_info *bdi)
 {
-	int i;
-
-	bdi_wb_shutdown(bdi);
-	bdi_set_min_ratio(bdi, 0);
-
-	WARN_ON(!list_empty(&bdi->work_list));
-	WARN_ON(delayed_work_pending(&bdi->wb.dwork));
-
-	if (bdi->dev) {
-		bdi_debug_unregister(bdi);
-		device_unregister(bdi->dev);
-		bdi->dev = NULL;
-	}
-
-	for (i = 0; i < NR_BDI_STAT_ITEMS; i++)
-		percpu_counter_destroy(&bdi->bdi_stat[i]);
-	fprop_local_destroy_percpu(&bdi->completions);
+	bdi_unregister(bdi);
+	bdi_exit(bdi);
 }
 EXPORT_SYMBOL(bdi_destroy);
 
@@ -476,11 +511,11 @@ static atomic_t nr_bdi_congested[2];
 
 void clear_bdi_congested(struct backing_dev_info *bdi, int sync)
 {
-	enum bdi_state bit;
+	enum wb_state bit;
 	wait_queue_head_t *wqh = &congestion_wqh[sync];
 
-	bit = sync ? BDI_sync_congested : BDI_async_congested;
-	if (test_and_clear_bit(bit, &bdi->state))
+	bit = sync ? WB_sync_congested : WB_async_congested;
+	if (test_and_clear_bit(bit, &bdi->wb.state))
 		atomic_dec(&nr_bdi_congested[sync]);
 	smp_mb__after_atomic();
 	if (waitqueue_active(wqh))
@@ -490,10 +525,10 @@ EXPORT_SYMBOL(clear_bdi_congested);
 
 void set_bdi_congested(struct backing_dev_info *bdi, int sync)
 {
-	enum bdi_state bit;
+	enum wb_state bit;
 
-	bit = sync ? BDI_sync_congested : BDI_async_congested;
-	if (!test_and_set_bit(bit, &bdi->state))
+	bit = sync ? WB_sync_congested : WB_async_congested;
+	if (!test_and_set_bit(bit, &bdi->wb.state))
 		atomic_inc(&nr_bdi_congested[sync]);
 }
 EXPORT_SYMBOL(set_bdi_congested);

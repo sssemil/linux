@@ -394,9 +394,13 @@ struct fb_cursor {
 
 #ifdef CONFIG_FB_BACKLIGHT
 /* Settings for the generic backlight code */
+#ifdef CONFIG_BACKLIGHT_10000
+#define FB_BACKLIGHT_LEVELS	5000
+#define FB_BACKLIGHT_MAX	0x26E8
+#else
 #define FB_BACKLIGHT_LEVELS	128
 #define FB_BACKLIGHT_MAX	0xFF
 #endif
-
+#endif
 
 #endif /* _UAPI_LINUX_FB_H */

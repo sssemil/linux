@@ -27,7 +27,7 @@ int check_user_usb_string(const char *name,
 
 #define GS_STRING_ITEM_ATTR(struct_name, name)	\
 	static struct struct_name##_attribute struct_name##_##name = \
-		__CONFIGFS_ATTR(name,  S_IRUGO | S_IWUSR,		\
+		__CONFIGFS_ATTR(name,  (S_IRUGO | S_IWUSR),		\
 				struct_name##_##name##_show,		\
 				struct_name##_##name##_store)
 

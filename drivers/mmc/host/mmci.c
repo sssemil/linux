@@ -38,9 +38,7 @@
 #include <linux/types.h>
 #include <linux/pinctrl/consumer.h>
 
-#include <asm/div64.h>
 #include <asm/io.h>
-#include <asm/sizes.h>
 
 #include "mmci.h"
 #include "mmci_qcom_dml.h"
@@ -1091,11 +1089,11 @@ static int mmci_pio_read(struct mmci_host *host, char *buffer, unsigned int rema
 				ioread32_rep(base + MMCIFIFO, buf, 1);
 				memcpy(ptr, buf, count);
 			} else {
-				ioread32_rep(base + MMCIFIFO, ptr, count >> 2);
+				ioread32_rep(base + MMCIFIFO, ptr, (unsigned int)count >> 2);
 				count &= ~0x3;
 			}
 		} else {
-			ioread32_rep(base + MMCIFIFO, ptr, count >> 2);
+			ioread32_rep(base + MMCIFIFO, ptr,(unsigned int)count >> 2);
 		}
 
 		ptr += count;

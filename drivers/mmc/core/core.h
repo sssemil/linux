@@ -16,6 +16,8 @@
 #define MMC_CMD_RETRIES        3
 
 struct mmc_bus_ops {
+	int (*awake)(struct mmc_host *);
+	int (*sleep)(struct mmc_host *);
 	void (*remove)(struct mmc_host *);
 	void (*detect)(struct mmc_host *);
 	int (*pre_suspend)(struct mmc_host *);
@@ -28,6 +30,10 @@ struct mmc_bus_ops {
 	int (*alive)(struct mmc_host *);
 	int (*shutdown)(struct mmc_host *);
 	int (*reset)(struct mmc_host *);
+#ifdef CONFIG_MMC_PASSWORDS	
+	int (*sysfs_add)(struct mmc_host *, struct mmc_card *card);
+	void (*sysfs_remove)(struct mmc_host *, struct mmc_card *card);
+#endif	
 };
 
 void mmc_attach_bus(struct mmc_host *host, const struct mmc_bus_ops *ops);
@@ -54,6 +60,8 @@ void mmc_power_up(struct mmc_host *host, u32 ocr);
 void mmc_power_off(struct mmc_host *host);
 void mmc_power_cycle(struct mmc_host *host, u32 ocr);
 void mmc_set_initial_state(struct mmc_host *host);
+void mmc_power_up_vcc(struct mmc_host *host,u32 ocr);
+void mmc_power_off_vcc(struct mmc_host *host);
 
 static inline void mmc_delay(unsigned int ms)
 {
@@ -88,6 +96,9 @@ void mmc_remove_card_debugfs(struct mmc_card *card);
 void mmc_init_context_info(struct mmc_host *host);
 
 int mmc_execute_tuning(struct mmc_card *card);
+
+int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
+	struct mmc_card *oldcard);
 
 #endif
 

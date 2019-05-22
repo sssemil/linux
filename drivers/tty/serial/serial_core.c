@@ -95,8 +95,15 @@ static void __uart_start(struct tty_struct *tty)
 	struct uart_state *state = tty->driver_data;
 	struct uart_port *port = state->uart_port;
 
+	if (port->ops->wake_peer)
+		port->ops->wake_peer(port);
+
 	if (!uart_tx_stopped(port))
 		port->ops->start_tx(port);
+#ifdef CONFIG_HISI_AMBA_PL011
+	else
+		dev_info(port->dev, "%s: ttyAMA%d start transfer failed!\n", __func__, port->line);
+#endif
 }
 
 static void uart_start(struct tty_struct *tty)
@@ -1409,7 +1416,7 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	mutex_lock(&port->mutex);
 	uart_shutdown(tty, state);
 	tty_port_tty_set(port, NULL);
-	tty->closing = 0;
+
 	spin_lock_irqsave(&port->lock, flags);
 
 	if (port->blocked_open) {
@@ -1435,6 +1442,7 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	mutex_unlock(&port->mutex);
 
 	tty_ldisc_flush(tty);
+	tty->closing = 0;
 }
 
 static void uart_wait_until_sent(struct tty_struct *tty, int timeout)

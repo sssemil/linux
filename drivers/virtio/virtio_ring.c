@@ -24,6 +24,8 @@
 #include <linux/module.h>
 #include <linux/hrtimer.h>
 #include <linux/kmemleak.h>
+#include <linux/remoteproc.h>
+#include <linux/kernel.h>
 
 #ifdef DEBUG
 /* For development, we want to crash whenever the ring is screwed. */
@@ -98,6 +100,17 @@ struct vring_virtqueue {
 
 #define to_vvq(_vq) container_of(_vq, struct vring_virtqueue, vq)
 
+#if (defined(CONFIG_HISI_HISTAR_ISP))
+static unsigned long get_device_addr(struct virtqueue *vq, dma_addr_t dma)
+{
+	struct virtio_device *vdev = vq->vdev;
+	struct rproc_vdev *rvdev = container_of(vdev, struct rproc_vdev, vdev);
+	struct rproc *rproc = rvdev->rproc;
+
+	return ((dma - vq->dma_base) + rproc->ipc_addr);
+}
+#endif
+
 static struct vring_desc *alloc_indirect(struct virtqueue *_vq,
 					 unsigned int total_sg, gfp_t gfp)
 {
@@ -132,6 +145,7 @@ static inline int virtqueue_add(struct virtqueue *_vq,
 	struct scatterlist *sg;
 	struct vring_desc *desc;
 	unsigned int i, n, avail, descs_used, uninitialized_var(prev);
+	dma_addr_t dma_tmp;
 	int head;
 	bool indirect;
 
@@ -206,7 +220,12 @@ static inline int virtqueue_add(struct virtqueue *_vq,
 	for (n = 0; n < out_sgs; n++) {
 		for (sg = sgs[n]; sg; sg = sg_next(sg)) {
 			desc[i].flags = cpu_to_virtio16(_vq->vdev, VRING_DESC_F_NEXT);
+#if (defined(CONFIG_HISI_HISTAR_ISP) || defined(CONFIG_HUAWEI_CAMERA_USE_HISP100))
+			dma_tmp = sg_dma_address(sg);
+			desc[i].addr = get_device_addr(_vq, dma_tmp);
+#else
 			desc[i].addr = cpu_to_virtio64(_vq->vdev, sg_phys(sg));
+#endif
 			desc[i].len = cpu_to_virtio32(_vq->vdev, sg->length);
 			prev = i;
 			i = virtio16_to_cpu(_vq->vdev, desc[i].next);
@@ -215,7 +234,12 @@ static inline int virtqueue_add(struct virtqueue *_vq,
 	for (; n < (out_sgs + in_sgs); n++) {
 		for (sg = sgs[n]; sg; sg = sg_next(sg)) {
 			desc[i].flags = cpu_to_virtio16(_vq->vdev, VRING_DESC_F_NEXT | VRING_DESC_F_WRITE);
+#if (defined(CONFIG_HISI_HISTAR_ISP) || defined(CONFIG_HUAWEI_CAMERA_USE_HISP100))
+			dma_tmp = sg_dma_address(sg);
+			desc[i].addr = get_device_addr(_vq, dma_tmp);
+#else
 			desc[i].addr = cpu_to_virtio64(_vq->vdev, sg_phys(sg));
+#endif
 			desc[i].len = cpu_to_virtio32(_vq->vdev, sg->length);
 			prev = i;
 			i = virtio16_to_cpu(_vq->vdev, desc[i].next);

@@ -47,12 +47,8 @@ int notrace unwind_frame(struct stackframe *frame)
 		return -EINVAL;
 
 	frame->sp = fp + 0x10;
-	frame->fp = *(unsigned long *)(fp);
-	/*
-	 * -4 here because we care about the PC at time of bl,
-	 * not where the return will go.
-	 */
-	frame->pc = *(unsigned long *)(fp + 8) - 4;
+	frame->fp = READ_ONCE_NOCHECK(*(unsigned long *)(fp));
+	frame->pc = READ_ONCE_NOCHECK(*(unsigned long *)(fp + 8));
 
 	return 0;
 }

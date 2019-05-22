@@ -522,4 +522,11 @@ source "lib/fonts/Kconfig"
 config ARCH_HAS_SG_CHAIN
 	def_bool n
 
+config WBT
+	bool "buffered writeback throttling"
+
+config QUASI
+    bool "quasi io"
+    default n
+
 endmenu

@@ -3,15 +3,16 @@
 #
 
 obj-y                          := main.o version.o mounts.o
-ifneq ($(CONFIG_BLK_DEV_INITRD),y)
 obj-y                          += noinitramfs.o
-else
 obj-$(CONFIG_BLK_DEV_INITRD)   += initramfs.o
-endif
 obj-$(CONFIG_GENERIC_CALIBRATE_DELAY) += calibrate.o
 
 ifneq ($(CONFIG_ARCH_INIT_TASK),y)
 obj-y                          += init_task.o
+endif
+
+ifeq ($(TARGET_BUILD_VARIANT),eng)
+EXTRA_CFLAGS += -DHISI_SN_CMDLINE
 endif
 
 mounts-y			:= do_mounts.o
@@ -31,6 +32,4 @@ $(obj)/version.o: include/generated/compile.h
  quiet_chk_compile.h = echo '  CHK     $@'
 silent_chk_compile.h = :
 include/generated/compile.h: FORCE
-	@$($(quiet)chk_compile.h)
-	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/mkcompile_h $@ \
-	"$(UTS_MACHINE)" "$(CONFIG_SMP)" "$(CONFIG_PREEMPT)" "$(CC) $(KBUILD_CFLAGS)"
+	@$($(quiet)chk_compile.h); $(CONFIG_SHELL) $(srctree)/scripts/mkcompile_h $@ "$(UTS_MACHINE)" "$(CONFIG_SMP)" "$(CONFIG_PREEMPT)" "$(CC) $(KBUILD_CFLAGS)"

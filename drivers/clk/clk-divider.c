@@ -58,12 +58,12 @@ static unsigned int _get_maxdiv(const struct clk_div_table *table, u8 width,
 				unsigned long flags)
 {
 	if (flags & CLK_DIVIDER_ONE_BASED)
-		return div_mask(width);
+		return div_mask(width);/*[false alarm]:return */
 	if (flags & CLK_DIVIDER_POWER_OF_TWO)
-		return 1 << div_mask(width);
+		return 1 << div_mask(width);/*[false alarm]:return */
 	if (table)
 		return _get_table_maxdiv(table);
-	return div_mask(width) + 1;
+	return div_mask(width) + 1;/*[false alarm]:return */
 }
 
 static unsigned int _get_table_div(const struct clk_div_table *table,
@@ -83,7 +83,7 @@ static unsigned int _get_div(const struct clk_div_table *table,
 	if (flags & CLK_DIVIDER_ONE_BASED)
 		return val;
 	if (flags & CLK_DIVIDER_POWER_OF_TWO)
-		return 1 << val;
+		return 1 << val;/*[false alarm]:return */
 	if (table)
 		return _get_table_div(table, val);
 	return val + 1;
@@ -404,11 +404,28 @@ static int clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
 
 	return 0;
 }
+#ifdef CONFIG_HISI_CLK_DEBUG
+static int hisi_divreg_check(struct clk_hw *hw)
+{
+	unsigned long rate;
+	struct clk *clk = hw->clk;
+	struct clk *pclk = clk_get_parent(clk);
+
+	rate = clk_divider_recalc_rate(hw, clk_get_rate(pclk));
+	if (rate == clk_get_rate(clk))
+		return 1;
+	else
+		return 0;
+}
+#endif
 
 const struct clk_ops clk_divider_ops = {
 	.recalc_rate = clk_divider_recalc_rate,
 	.round_rate = clk_divider_round_rate,
 	.set_rate = clk_divider_set_rate,
+#ifdef CONFIG_HISI_CLK_DEBUG
+	.check_divreg = hisi_divreg_check,
+#endif
 };
 EXPORT_SYMBOL_GPL(clk_divider_ops);
 
@@ -439,7 +456,7 @@ static struct clk *_register_divider(struct device *dev, const char *name,
 	init.name = name;
 	init.ops = &clk_divider_ops;
 	init.flags = flags | CLK_IS_BASIC;
-	init.parent_names = (parent_name ? &parent_name: NULL);
+	init.parent_names = (parent_name ? &parent_name : NULL);
 	init.num_parents = (parent_name ? 1 : 0);
 
 	/* struct clk_divider assignments */

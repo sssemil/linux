@@ -291,7 +291,7 @@ struct scsi_cmnd *scsi_get_command(struct scsi_device *dev, gfp_t gfp_mask)
 	cmd->jiffies_at_alloc = jiffies;
 	return cmd;
 }
-
+EXPORT_SYMBOL(scsi_get_command);
 /**
  * __scsi_put_command - Free a struct scsi_cmnd
  * @shost: dev->host
@@ -590,7 +590,7 @@ void scsi_log_completion(struct scsi_cmnd *cmd, int disposition)
 void scsi_cmd_get_serial(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 {
 	cmd->serial_number = host->cmd_serial_number++;
-	if (cmd->serial_number == 0) 
+	if (cmd->serial_number == 0)
 		cmd->serial_number = host->cmd_serial_number++;
 }
 EXPORT_SYMBOL(scsi_cmd_get_serial);
@@ -685,6 +685,10 @@ int scsi_change_queue_depth(struct scsi_device *sdev, int depth)
 	}
 
 	sdev->queue_depth = depth;
+	if (sdev->request_queue)
+		/*lint -save -e732*/
+		blk_set_queue_depth(sdev->request_queue, depth);
+		/*lint -restore*/
 out_unlock:
 	spin_unlock_irqrestore(sdev->request_queue->queue_lock, flags);
 out:
@@ -1199,6 +1203,23 @@ struct scsi_device *scsi_device_lookup(struct Scsi_Host *shost,
 	return sdev;
 }
 EXPORT_SYMBOL(scsi_device_lookup);
+
+/**
+ * __set_quiesce_for_each_device - set all scsi device state to quiet
+ * @shost:	SCSI host pointer
+ *
+ * Description: this func will be called when shut down to forbid io req
+ * from block level;this func is added by hisi.
+ **/
+void __set_quiesce_for_each_device(struct Scsi_Host *shost)
+{
+	struct scsi_device *sdev;
+
+	__shost_for_each_device(sdev, shost)/*lint !e64 !e826*/
+		(void)scsi_device_quiesce(sdev);
+}
+EXPORT_SYMBOL(__set_quiesce_for_each_device);
+
 
 MODULE_DESCRIPTION("SCSI core");
 MODULE_LICENSE("GPL");

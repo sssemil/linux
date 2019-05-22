@@ -133,6 +133,9 @@ static struct blk_queue_tag *__blk_queue_init_tags(struct request_queue *q,
 	atomic_set(&tags->refcnt, 1);
 	tags->alloc_policy = alloc_policy;
 	tags->next_tag = 0;
+#ifdef CONFIG_HISI_BLK_CORE
+	hisi_blk_allocated_tags_init(tags);
+#endif
 	return tags;
 fail:
 	kfree(tags);
@@ -179,13 +182,16 @@ int blk_queue_init_tags(struct request_queue *q, int depth,
 			return rc;
 		queue_flag_set(QUEUE_FLAG_QUEUED, q);
 		return 0;
-	} else
+	} else if(tags)
 		atomic_inc(&tags->refcnt);
 
 	/*
 	 * assign it, all done
 	 */
 	q->queue_tags = tags;
+#ifdef CONFIG_HISI_BLK_CORE
+	blk_add_queue_tags(tags,q);
+#endif
 	queue_flag_set_unlocked(QUEUE_FLAG_QUEUED, q);
 	INIT_LIST_HEAD(&q->tag_busy_list);
 	return 0;

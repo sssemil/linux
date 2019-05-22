@@ -1452,7 +1452,7 @@ static int sh_mmcif_probe(struct platform_device *pdev)
 	sh_mmcif_sync_reset(host);
 	sh_mmcif_writel(host->addr, MMCIF_CE_INT_MASK, MASK_ALL);
 
-	name = irq[1] < 0 ? dev_name(&pdev->dev) : "sh_mmc:error";
+	name = (irq[1] < 0) ? dev_name(&pdev->dev) : "sh_mmc:error";
 	ret = devm_request_threaded_irq(&pdev->dev, irq[0], sh_mmcif_intr,
 					sh_mmcif_irqt, 0, name, host);
 	if (ret) {

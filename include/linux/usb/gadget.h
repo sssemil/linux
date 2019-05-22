@@ -568,6 +568,9 @@ struct usb_gadget {
 	unsigned			a_alt_hnp_support:1;
 	unsigned			quirk_ep_out_aligned_size:1;
 	unsigned			is_selfpowered:1;
+#ifdef CONFIG_HISI_USB_CONFIGFS
+	unsigned			is_removing_driver;
+#endif
 };
 #define work_to_gadget(w)	(container_of((w), struct usb_gadget, work))
 

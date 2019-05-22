@@ -811,6 +811,10 @@
  *	as an event to indicate changes for devices with wiphy-specific regdom
  *	management.
  *
+ * @NL80211_CMD_ABORT_SCAN: Stop an ongoing scan. Returns -ENOENT if a scan is
+ *	not running. The driver indicates the status of the scan through
+ *	cfg80211_scan_done().
+ *
  * @NL80211_CMD_MAX: highest used command number
  * @__NL80211_CMD_AFTER_LAST: internal use
  */
@@ -997,6 +1001,16 @@ enum nl80211_commands {
 
 	NL80211_CMD_WIPHY_REG_CHANGE,
 
+	NL80211_CMD_ABORT_SCAN,
+	/* because of disagreement with nl80211_copy.h in wpa_supplicant code,
+	this private command is defined as a larger number, you should
+	add new commands below in order to not conflict with this one */
+#ifdef CONFIG_HW_VOWIFI
+	NL80211_CMD_VOWIFI = 201,
+#endif
+#ifdef CONFIG_HW_ABS
+	NL80211_CMD_ANT = 202,
+#endif
 	/* add new commands above here */
 
 	/* used to define NL80211_CMD_MAX below */
@@ -3458,6 +3472,9 @@ enum nl80211_mfp {
 enum nl80211_wpa_versions {
 	NL80211_WPA_VERSION_1 = 1 << 0,
 	NL80211_WPA_VERSION_2 = 1 << 1,
+#if defined (CONFIG_BCMDHD) || defined (CONFIG_CONNECTIVITY_HI110X)
+	NL80211_WAPI_VERSION_1 = 1 << 2,
+#endif
 };
 
 /**

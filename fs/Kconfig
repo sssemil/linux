@@ -4,6 +4,13 @@
 
 menu "File systems"
 
+# Use atime update while big file access
+config HISI_ATIME
+	bool "atime feature support"
+	default n
+	help
+	atime update while big file access
+
 # Use unaligned word dcache accesses
 config DCACHE_WORD_ACCESS
        bool
@@ -70,6 +77,8 @@ config FILE_LOCKING
           for filesystems like NFS and for the flock() system
           call. Disabling this option saves about 11k.
 
+source "fs/crypto/Kconfig"
+
 source "fs/notify/Kconfig"
 
 source "fs/quota/Kconfig"
@@ -77,6 +86,7 @@ source "fs/quota/Kconfig"
 source "fs/autofs4/Kconfig"
 source "fs/fuse/Kconfig"
 source "fs/overlayfs/Kconfig"
+source "fs/sdcardfs/Kconfig"
 
 menu "Caches"
 
@@ -99,6 +109,7 @@ menu "DOS/FAT/NT Filesystems"
 
 source "fs/fat/Kconfig"
 source "fs/ntfs/Kconfig"
+source "fs/exfat/Kconfig"
 
 endmenu
 endif # BLOCK

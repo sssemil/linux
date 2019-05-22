@@ -42,6 +42,21 @@
 #include <linux/gfp.h>
 #include <linux/module.h>
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+#include <net/tcp_crosslayer.h>
+#endif
+
+#ifdef CONFIG_HW_WIFIPRO
+#include <huawei_platform/net/ipv4/wifipro_tcp_monitor.h>
+#endif
+#ifdef CONFIG_HW_WIFI
+#include <huawei_platform/net/ipv4/wifi_tcp_statistics.h>
+#endif
+
+#ifdef CONFIG_HUAWEI_FEATURE_PRINT_PID_NAME
+#include <huawei_platform/power/pid_socket/pid_socket.h>
+#endif
+
 /* People can turn this off for buggy TCP's found in printers etc. */
 int sysctl_tcp_retrans_collapse __read_mostly = 1;
 
@@ -67,6 +82,27 @@ EXPORT_SYMBOL(sysctl_tcp_notsent_lowat);
 
 static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			   int push_one, gfp_t gfp);
+
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+static inline unsigned int tcp_cwnd_test(const struct tcp_sock *tp,
+					 const struct sk_buff *skb);
+
+static inline unsigned int tcp_snd_wnd_remain(const struct sock *sk,
+					      const struct tcp_sock *tp,
+					      const struct sk_buff *skb)
+{
+	u32 end_seq = TCP_SKB_CB(skb)->end_seq;
+	u32 cur_mss = tcp_current_mss((struct sock *)sk);
+
+	if (skb->len > cur_mss)
+		end_seq = TCP_SKB_CB(skb)->seq + cur_mss;
+
+	if (!after(end_seq, tcp_wnd_end(tp)))
+		return tcp_wnd_end(tp) - end_seq;
+	else
+		return 0;
+}
+#endif
 
 /* Account for new data that has been sent to the network. */
 static void tcp_event_new_data_sent(struct sock *sk, const struct sk_buff *skb)
@@ -194,7 +230,7 @@ u32 tcp_default_init_rwnd(u32 mss)
 	 * (RFC 3517, Section 4, NextSeg() rule (2)). Further place a
 	 * limit when mss is larger than 1460.
 	 */
-	u32 init_rwnd = TCP_INIT_CWND * 2;
+	u32 init_rwnd = sysctl_tcp_default_init_rwnd;
 
 	if (mss > 1460)
 		init_rwnd = max((1460 * init_rwnd) / mss, 2U);
@@ -782,10 +818,18 @@ static void tcp_tasklet_func(unsigned long data)
 	}
 }
 
-#define TCP_DEFERRED_ALL ((1UL << TCP_TSQ_DEFERRED) |		\
-			  (1UL << TCP_WRITE_TIMER_DEFERRED) |	\
-			  (1UL << TCP_DELACK_TIMER_DEFERRED) |	\
-			  (1UL << TCP_MTU_REDUCED_DEFERRED))
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+#define TCP_DEFERRED_ALL ((1UL << TCP_TSQ_DEFERRED) |           \
+				(1UL << TCP_WRITE_TIMER_DEFERRED) |   \
+				(1UL << TCP_DELACK_TIMER_DEFERRED) |  \
+				(1UL << TCP_MTU_REDUCED_DEFERRED) |   \
+				(1UL << TCP_CROSSLAYER_RECOVERY_DEFERRED))
+#else
+#define TCP_DEFERRED_ALL ((1UL << TCP_TSQ_DEFERRED) |           \
+				(1UL << TCP_WRITE_TIMER_DEFERRED) |   \
+				(1UL << TCP_DELACK_TIMER_DEFERRED) |  \
+				(1UL << TCP_MTU_REDUCED_DEFERRED))
+#endif
 /**
  * tcp_release_cb - tcp release_sock() callback
  * @sk: socket
@@ -832,6 +876,12 @@ void tcp_release_cb(struct sock *sk)
 		inet_csk(sk)->icsk_af_ops->mtu_reduced(sk);
 		__sock_put(sk);
 	}
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+	if (aspen_tcp_cdn &&
+	    flags & (1UL << TCP_CROSSLAYER_RECOVERY_DEFERRED)) {
+		aspen_tcp_crosslayer_retransmit(sk);
+	}
+#endif
 }
 EXPORT_SYMBOL(tcp_release_cb);
 
@@ -934,11 +984,15 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 	tcb = TCP_SKB_CB(skb);
 	memset(&opts, 0, sizeof(opts));
 
-	if (unlikely(tcb->tcp_flags & TCPHDR_SYN))
+	if (unlikely(tcb->tcp_flags & TCPHDR_SYN)) {
+#ifdef CONFIG_HUAWEI_FEATURE_PRINT_PID_NAME
+		print_process_pid_name(inet);
+#endif
 		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
-	else
+	} else {
 		tcp_options_size = tcp_established_options(sk, skb, &opts,
 							   &md5);
+	}
 	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
 
 	if (tcp_packets_in_flight(tp) == 0)
@@ -997,6 +1051,15 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 	if (likely((tcb->tcp_flags & TCPHDR_SYN) == 0))
 		tcp_ecn_send(sk, skb, tcp_header_size);
 
+#ifdef CONFIG_HW_CROSSLAYER_OPT_DBG_MODULE
+	if (skb)
+		aspen_collect_tcp_sender_monitor(sk, skb,
+			(opts.options & OPTION_TS) ? opts.tsval : 0,
+			(opts.options & OPTION_TS) ? opts.tsecr : 0,
+			tcp_cwnd_test(tp, skb),
+			tcp_snd_wnd_remain(sk, tp, skb));
+#endif
+
 #ifdef CONFIG_TCP_MD5SIG
 	/* Calculate the MD5 hash, as we have all we need now */
 	if (md5) {
@@ -1024,9 +1087,13 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 	/* Our usage of tstamp should remain private */
 	skb->tstamp.tv64 = 0;
 
+#ifdef CONFIG_HW_WIFI
+	wifi_IncrSendSegs(sk, tcp_skb_pcount(skb));
+#endif
+
 	/* Cleanup our debris for IP stacks */
 	memset(skb->cb, 0, max(sizeof(struct inet_skb_parm),
-			       sizeof(struct inet6_skb_parm)));
+                               sizeof(struct inet6_skb_parm)));
 
 	err = icsk->icsk_af_ops->queue_xmit(sk, skb, &inet->cork.fl);
 
@@ -1599,7 +1666,7 @@ static inline unsigned int tcp_cwnd_test(const struct tcp_sock *tp,
 	u32 in_flight, cwnd, halfcwnd;
 
 	/* Don't be strict about the congestion window for the final FIN.  */
-	if ((TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) &&
+	if ((TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) &&	/*lint !e413 */
 	    tcp_skb_pcount(skb) == 1)
 		return 1;
 
@@ -2056,6 +2123,11 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	while ((skb = tcp_send_head(sk))) {
 		unsigned int limit;
 
+#ifdef CONFIG_HUAWEI_BASTET
+		if (bastet_sock_send_prepare(sk))
+			break;
+#endif
+
 		tso_segs = tcp_init_tso_segs(sk, skb, mss_now);
 		BUG_ON(!tso_segs);
 
@@ -2112,8 +2184,16 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 * of queued bytes to ensure line rate.
 		 * One example is wifi aggregation (802.11 AMPDU)
 		 */
-		limit = max(2 * skb->truesize, sk->sk_pacing_rate >> 10);
-		limit = min_t(u32, limit, sysctl_tcp_limit_output_bytes);
+
+		 /* limit = max(2 * skb->truesize, sk->sk_pacing_rate >> 10);
+		  * limit = min_t(u32, limit, sysctl_tcp_limit_output_bytes);
+		  * 
+		  * We do not use GSO, and tx completions are slow, tcp stack tries to
+		  * push more packets but blocked on limit of two packet or ~1 ms.
+		  * So we revert the limit to sysctl_tcp_limit_output_bytes or ~1 ms.
+		  */
+		limit = max_t(unsigned int, sysctl_tcp_limit_output_bytes,
+			      sk->sk_pacing_rate >> 10);
 
 		if (atomic_read(&sk->sk_wmem_alloc) > limit) {
 			set_bit(TSQ_THROTTLED, &tp->tsq_flags);
@@ -2627,8 +2707,10 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 	 */
 	if (unlikely((NET_IP_ALIGN && ((unsigned long)skb->data & 3)) ||
 		     skb_headroom(skb) >= 0xFFFF)) {
-		struct sk_buff *nskb = __pskb_copy(skb, MAX_TCP_HEADER,
-						   GFP_ATOMIC);
+		struct sk_buff *nskb;
+
+		skb_mstamp_get(&skb->skb_mstamp);
+		nskb = __pskb_copy(skb, MAX_TCP_HEADER, GFP_ATOMIC);
 		err = nskb ? tcp_transmit_skb(sk, nskb, 0, GFP_ATOMIC) :
 			     -ENOBUFS;
 	} else {
@@ -2645,6 +2727,9 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 	}
 	return err;
 }
+#ifdef CONFIG_HW_CROSSLAYER_OPT
+EXPORT_SYMBOL(__tcp_retransmit_skb);
+#endif
 
 int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 {
@@ -2893,11 +2978,16 @@ void tcp_send_active_reset(struct sock *sk, gfp_t priority)
 	skb_reserve(skb, MAX_TCP_HEADER);
 	tcp_init_nondata_skb(skb, tcp_acceptable_seq(sk),
 			     TCPHDR_ACK | TCPHDR_RST);
+	skb_mstamp_get(&skb->skb_mstamp);
 	/* Send it off. */
 	if (tcp_transmit_skb(sk, skb, 0, priority))
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTFAILED);
 
 	TCP_INC_STATS(sock_net(sk), TCP_MIB_OUTRSTS);
+
+#ifdef CONFIG_HW_WIFI
+	wifi_IncrRstSegs(sk, 1);
+#endif
 }
 
 /* Send a crossed SYN-ACK during socket establishment.
@@ -3011,6 +3101,10 @@ struct sk_buff *tcp_make_synack(struct sock *sk, struct dst_entry *dst,
 	tcp_options_write((__be32 *)(th + 1), tp, &opts);
 	th->doff = (tcp_header_size >> 2);
 	TCP_INC_STATS_BH(sock_net(sk), TCP_MIB_OUTSEGS);
+
+#ifdef CONFIG_HW_WIFI
+	wifi_IncrSendSegs(sk, 1);
+#endif
 
 #ifdef CONFIG_TCP_MD5SIG
 	/* Okay, we have all we need - do the md5 hash if needed */
@@ -3142,7 +3236,7 @@ static int tcp_send_syn_data(struct sock *sk, struct sk_buff *syn)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_fastopen_request *fo = tp->fastopen_req;
-	int syn_loss = 0, space, err = 0, copied;
+	int syn_loss = 0, space, err = 0;
 	unsigned long last_syn_loss = 0;
 	struct sk_buff *syn_data;
 
@@ -3180,17 +3274,18 @@ static int tcp_send_syn_data(struct sock *sk, struct sk_buff *syn)
 		goto fallback;
 	syn_data->ip_summed = CHECKSUM_PARTIAL;
 	memcpy(syn_data->cb, syn->cb, sizeof(syn->cb));
-	copied = copy_from_iter(skb_put(syn_data, space), space,
-				&fo->data->msg_iter);
-	if (unlikely(!copied)) {
-		kfree_skb(syn_data);
-		goto fallback;
+	if (space) {
+		int copied = copy_from_iter(skb_put(syn_data, space), space,
+					    &fo->data->msg_iter);
+		if (unlikely(!copied)) {
+			kfree_skb(syn_data);
+			goto fallback;
+		}
+		if (copied != space) {
+			skb_trim(syn_data, copied);
+			space = copied;
+		}
 	}
-	if (copied != space) {
-		skb_trim(syn_data, copied);
-		space = copied;
-	}
-
 	/* No more data pending in inet_wait_for_connect() */
 	if (space == fo->size)
 		fo->data = NULL;
@@ -3233,6 +3328,9 @@ int tcp_connect(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *buff;
 	int err;
+#ifdef CONFIG_HW_WIFIPRO
+	int wifipro_dev_max_len = 0;
+#endif
 
 	tcp_connect_init(sk);
 
@@ -3266,6 +3364,15 @@ int tcp_connect(struct sock *sk)
 	/* Timer for repeating the SYN until an answer. */
 	inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
 				  inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
+#ifdef CONFIG_HW_WIFIPRO
+	if (buff->dev) {
+	    wifipro_dev_max_len = strnlen(buff->dev->name, IFNAMSIZ-1);
+	    strncpy(buff->sk->wifipro_dev_name, buff->dev->name, wifipro_dev_max_len);
+	    buff->sk->wifipro_dev_name[wifipro_dev_max_len] = '\0';
+	    WIFIPRO_DEBUG("wifipro_dev_name is %s", buff->dev->name);
+	}
+#endif
+
 	return 0;
 }
 EXPORT_SYMBOL(tcp_connect);

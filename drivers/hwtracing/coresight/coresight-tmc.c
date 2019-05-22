@@ -599,6 +599,7 @@ static ssize_t status_show(struct device *dev,
 
 	clk_disable_unprepare(drvdata->clk);
 
+	/* cppcheck-suppress * */
 	return sprintf(buf,
 		       "Depth:\t\t0x%x\n"
 		       "Status:\t\t0x%x\n"

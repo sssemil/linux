@@ -681,9 +681,9 @@ static int __nbd_ioctl(struct block_device *bdev, struct nbd_device *nbd,
 			queue_flag_set_unlocked(QUEUE_FLAG_DISCARD,
 				nbd->disk->queue);
 		if (nbd->flags & NBD_FLAG_SEND_FLUSH)
-			blk_queue_flush(nbd->disk->queue, REQ_FLUSH);
+			blk_queue_write_cache(nbd->disk->queue, true, false);
 		else
-			blk_queue_flush(nbd->disk->queue, 0);
+			blk_queue_write_cache(nbd->disk->queue, false, false);
 
 		thread = kthread_run(nbd_thread, nbd, "%s",
 				     nbd->disk->disk_name);
@@ -824,7 +824,7 @@ static int __init nbd_init(void)
 		queue_flag_set_unlocked(QUEUE_FLAG_NONROT, disk->queue);
 		queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, disk->queue);
 		disk->queue->limits.discard_granularity = 512;
-		disk->queue->limits.max_discard_sectors = UINT_MAX;
+		blk_queue_max_discard_sectors(disk->queue, UINT_MAX);
 		disk->queue->limits.discard_zeroes_data = 0;
 		blk_queue_max_hw_sectors(disk->queue, 65536);
 		disk->queue->limits.max_sectors = 256;

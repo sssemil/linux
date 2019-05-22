@@ -21,12 +21,13 @@
 #include <linux/init.h>
 #include <linux/linkage.h>
 
-#include <asm/alternative-asm.h>
+#include <asm/alternative.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
 #include <asm/cpufeature.h>
 #include <asm/errno.h>
 #include <asm/esr.h>
+#include <asm/memory.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 
@@ -93,7 +94,13 @@
 	disable_step_tsk x19, x20		// exceptions when scheduling.
 	.else
 	add	x21, sp, #S_FRAME_SIZE
-	.endif
+	get_thread_info tsk
+	/* Save the task's original addr_limit and set USER_DS (TASK_SIZE_64) */
+	ldr	x20, [tsk, #TI_ADDR_LIMIT]
+	str	x20, [sp, #S_ORIG_ADDR_LIMIT]
+	mov	x20, #TASK_SIZE_64
+	str	x20, [tsk, #TI_ADDR_LIMIT]
+	.endif /* \el == 0 */
 	mrs	x22, elr_el1
 	mrs	x23, spsr_el1
 	stp	lr, x21, [sp, #S_LR]
@@ -117,28 +124,34 @@
 	.endm
 
 	.macro	kernel_exit, el, ret = 0
+	.if	\el != 0
+	/* Restore the task's original addr_limit. */
+	ldr	x20, [sp, #S_ORIG_ADDR_LIMIT]
+	str	x20, [tsk, #TI_ADDR_LIMIT]
+	.endif
+
 	ldp	x21, x22, [sp, #S_PC]		// load ELR, SPSR
 	.if	\el == 0
 	ct_user_enter
 	ldr	x23, [sp, #S_SP]		// load return stack pointer
 	msr	sp_el0, x23
-
 #ifdef CONFIG_ARM64_ERRATUM_845719
-	alternative_insn						\
-	"nop",								\
-	"tbz x22, #4, 1f",						\
-	ARM64_WORKAROUND_845719
+alternative_if_not ARM64_WORKAROUND_845719
+	nop
+	nop
 #ifdef CONFIG_PID_IN_CONTEXTIDR
-	alternative_insn						\
-	"nop; nop",							\
-	"mrs x29, contextidr_el1; msr contextidr_el1, x29; 1:",		\
-	ARM64_WORKAROUND_845719
-#else
-	alternative_insn						\
-	"nop",								\
-	"msr contextidr_el1, xzr; 1:",					\
-	ARM64_WORKAROUND_845719
+	nop
 #endif
+alternative_else
+	tbz	x22, #4, 1f
+#ifdef CONFIG_PID_IN_CONTEXTIDR
+	mrs	x29, contextidr_el1
+	msr	contextidr_el1, x29
+#else
+	msr contextidr_el1, xzr
+#endif
+1:
+alternative_endif
 #endif
 	.endif
 	msr	elr_el1, x21			// set up the return data
@@ -170,6 +183,12 @@
 	.macro	get_thread_info, rd
 	mov	\rd, sp
 	and	\rd, \rd, #~(THREAD_SIZE - 1)	// top of stack
+#ifdef CONFIG_HUAWEI_KERNEL_STACK_RANDOMIZE_STRONG
+	stp	x23, x24, [sp, #-16]!
+	ldr_l	x23, kti_offset, x24
+	add	\rd, \rd, x23
+	ldp	x23, x24, [sp], #16
+#endif
 	.endm
 
 /*
@@ -208,18 +227,30 @@ ENTRY(vectors)
 
 	ventry	el1_sync			// Synchronous EL1h
 	ventry	el1_irq				// IRQ EL1h
+#ifdef CONFIG_HISI_FIQ
+	ventry	el1_fiq				// FIQ EL1h
+#else
 	ventry	el1_fiq_invalid			// FIQ EL1h
+#endif
 	ventry	el1_error_invalid		// Error EL1h
 
 	ventry	el0_sync			// Synchronous 64-bit EL0
 	ventry	el0_irq				// IRQ 64-bit EL0
+#ifdef CONFIG_HISI_FIQ
+	ventry	el0_fiq				// FIQ 64-bit EL0
+#else
 	ventry	el0_fiq_invalid			// FIQ 64-bit EL0
+#endif
 	ventry	el0_error_invalid		// Error 64-bit EL0
 
 #ifdef CONFIG_COMPAT
 	ventry	el0_sync_compat			// Synchronous 32-bit EL0
 	ventry	el0_irq_compat			// IRQ 32-bit EL0
+#ifdef CONFIG_HISI_FIQ
+	ventry	el0_fiq_compat			// FIQ 32-bit EL0
+#else
 	ventry	el0_fiq_invalid_compat		// FIQ 32-bit EL0
+#endif
 	ventry	el0_error_invalid_compat	// Error 32-bit EL0
 #else
 	ventry	el0_sync_invalid		// Synchronous 32-bit EL0
@@ -300,6 +331,10 @@ el1_sync:
 	b.eq	el1_sp_pc
 	cmp	x24, #ESR_ELx_EC_UNKNOWN	// unknown exception in EL1
 	b.eq	el1_undef
+#ifdef CONFIG_TLB_CONFLICT_WORKAROUND
+	cmp	x24, #ESR_ELx_EC_IABT_CUR	// IABT (current EL)
+	b.eq	el1_iabt_curr_el
+#endif
 	cmp	x24, #ESR_ELx_EC_BREAKPT_CUR	// debug exception in EL1
 	b.ge	el1_dbg
 	b	el1_inv
@@ -352,6 +387,13 @@ el1_inv:
 	mov	x1, #BAD_SYNC
 	mrs	x2, esr_el1
 	b	bad_mode
+#ifdef CONFIG_TLB_CONFLICT_WORKAROUND
+el1_iabt_curr_el:
+	mrs	x0, far_el1
+	mov	x2, sp
+	bl	do_iabt_curr_el
+	kernel_exit 1
+#endif
 ENDPROC(el1_sync)
 
 	.align	6
@@ -387,7 +429,14 @@ el1_preempt:
 	tbnz	x0, #TIF_NEED_RESCHED, 1b	// needs rescheduling?
 	ret	x24
 #endif
-
+#ifdef CONFIG_HISI_FIQ
+el1_fiq:
+	kernel_entry 1
+	mov	x0, sp
+	mrs	x1, esr_el1
+	b	fiq_dump
+ENDPROC(el1_fiq)
+#endif
 /*
  * EL0 mode handlers.
  */
@@ -446,6 +495,8 @@ el0_sync_compat:
 	b.eq	el0_undef
 	cmp	x24, #ESR_ELx_EC_CP14_64	// CP14 MRRC/MCRR trap
 	b.eq	el0_undef
+	cmp	x24, #ESR_ELx_EC_PC_ALIGN	// pc alignment exception
+	b.eq	el0_sp_pc
 	cmp	x24, #ESR_ELx_EC_BREAKPT_LOW	// debug exception in EL0
 	b.ge	el0_dbg
 	b	el0_inv
@@ -462,6 +513,14 @@ el0_svc_compat:
 el0_irq_compat:
 	kernel_entry 0, 32
 	b	el0_irq_naked
+#ifdef CONFIG_HISI_FIQ
+el0_fiq_compat:
+	kernel_entry 0, 32
+	mov	x0, sp
+	mrs	x1, esr_el1
+	b	fiq_dump
+#endif
+
 #endif
 
 el0_da:
@@ -517,6 +576,7 @@ el0_sp_pc:
 	mrs	x26, far_el1
 	// enable interrupts before calling the main handler
 	enable_dbg_and_irq
+	ct_user_exit
 	mov	x0, x26
 	mov	x1, x25
 	mov	x2, sp
@@ -571,6 +631,14 @@ el0_irq_naked:
 #endif
 	b	ret_to_user
 ENDPROC(el0_irq)
+#ifdef CONFIG_HISI_FIQ
+el0_fiq:
+	kernel_entry 0
+	mov	x0, sp
+	mrs	x1, esr_el1
+	b	fiq_dump
+ENDPROC(el0_fiq)
+#endif
 
 /*
  * Register switch for AArch64. The callee-saved registers need to be saved
@@ -607,6 +675,26 @@ ENDPROC(cpu_switch_to)
  * and this includes saving x0 back into the kernel stack.
  */
 ret_fast_syscall:
+#ifdef CONFIG_HISI_BB
+#ifdef CONFIG_HISI_BB_SYSCALL
+/*
+*This is the syscall debug patch. The default is off.
+*/
+#syscall_hook start
+	push	x6, x7
+	push	x4, x5
+	push	x2, x3
+	push	x0, x1
+	mov x0, scno
+	mov x1, #1
+	bl syscall_hook
+	pop	x0, x1
+	pop	x2, x3
+	pop	x4, x5
+	pop	x6, x7
+#syscall_hook end
+#endif
+#endif
 	disable_irq				// disable interrupts
 	ldr	x1, [tsk, #TI_FLAGS]
 	and	x2, x1, #_TIF_WORK_MASK
@@ -670,6 +758,26 @@ el0_svc_naked:					// compat entry point
 	enable_dbg_and_irq
 	ct_user_exit 1
 
+#ifdef CONFIG_HISI_BB
+#ifdef CONFIG_HISI_BB_SYSCALL
+/*
+*This is the syscall debug patch. The default is off.
+*/
+#syscall_hook start
+	push	x6, x7
+	push	x4, x5
+	push	x2, x3
+	push	x0, x1
+	mov x0, scno
+	mov x1, #0
+	bl syscall_hook
+	pop	x0, x1
+	pop	x2, x3
+	pop	x4, x5
+	pop	x6, x7
+#syscall_hook end
+#endif
+#endif
 	ldr	x16, [tsk, #TI_FLAGS]		// check for syscall hooks
 	tst	x16, #_TIF_SYSCALL_WORK
 	b.ne	__sys_trace
@@ -728,3 +836,41 @@ ENTRY(sys_rt_sigreturn_wrapper)
 	mov	x0, sp
 	b	sys_rt_sigreturn
 ENDPROC(sys_rt_sigreturn_wrapper)
+
+#ifdef CONFIG_HISI_BB
+
+ENTRY(get_pt_regs)
+	stp x29, x30, [SP, #-0x30]!
+	stp x0, x1, [sp, #0x10]
+	stp x2, x3, [sp, #0x20]
+	stp x0, x1, [x0]
+	stp x2, x3, [x0, #0x10]!
+	stp x4, x5, [x0, #0x10]!
+	stp x6, x7, [x0, #0x10]!
+	stp x8, x9, [x0, #0x10]!
+	stp x10, x11, [x0, #0x10]!
+	stp x12, x13, [x0, #0x10]!
+	stp x14, x15, [x0, #0x10]!
+	stp x16, x17, [x0, #0x10]!
+	stp x18, x19, [x0, #0x10]!
+	stp x20, x21, [x0, #0x10]!
+	stp x22, x23, [x0, #0x10]!
+	stp x24, x25, [x0, #0x10]!
+	stp x26, x27, [x0, #0x10]!
+	stp x28, x29, [x0, #0x10]!
+	ldr x1, [sp] 					//get preceding sp
+	ldr x2, [x1, #0x8] 				//get preceding lr
+	str x2, [x0, #0x10]! 			//set lr
+	str x1, [x0, #0x8]! 			//set sp
+	mrs x1, NZCV 					//get pstate flag
+	mrs x2, DAIF
+	mrs x3, CurrentEL
+	orr x1, x1, x2
+	orr x1, x1, x3
+	stp lr, x1, [x0, #0x8]! 		//set pc,pstate
+	pop x29, x30
+	pop x0, x1
+	pop x2, x3
+	ret
+ENDPROC(get_pt_regs)
+#endif

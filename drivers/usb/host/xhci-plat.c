@@ -24,6 +24,8 @@
 #include "xhci-mvebu.h"
 #include "xhci-rcar.h"
 
+#include "xhci-debugfs.h"
+
 static struct hc_driver __read_mostly xhci_plat_hc_driver;
 
 static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
@@ -84,18 +86,31 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return -ENODEV;
 
-	/* Initialize dma_mask and coherent_dma_mask to 32-bits */
-	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
-	if (!pdev->dev.dma_mask)
-		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
+	/* backporting from commit:0ebbe398f68be0d9bbd41dcfb57319e697756b37 */
+	/* Try to set 64-bit DMA first */
+	/*lint -e598 -e648*/
+	if (WARN_ON(!pdev->dev.dma_mask))
+		/* Platform did not initialize dma_mask */
+		ret = dma_coerce_mask_and_coherent(&pdev->dev,
+						   DMA_BIT_MASK(64));
 	else
-		dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+
+	/* If seting 64-bit DMA mask fails, fall back to 32-bit DMA mask */
+	if (ret) {
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (ret)
+			return ret;
+	}
+	/*lint +e598 +e648*/
 
 	hcd = usb_create_hcd(driver, &pdev->dev, dev_name(&pdev->dev));
 	if (!hcd)
 		return -ENOMEM;
+
+#ifdef CONFIG_HISI_USB_SKIP_RESUME
+	hcd_to_bus(hcd)->skip_resume = true;
+#endif
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	hcd->regs = devm_ioremap_resource(&pdev->dev, res);
@@ -144,6 +159,10 @@ static int xhci_plat_probe(struct platform_device *pdev)
 		goto dealloc_usb2_hcd;
 	}
 
+#ifdef CONFIG_HISI_USB_SKIP_RESUME
+	hcd_to_bus(xhci->shared_hcd)->skip_resume = true;
+#endif
+
 	if ((node && of_property_read_bool(node, "usb3-lpm-capable")) ||
 			(pdata && pdata->usb3_lpm_capable))
 		xhci->quirks |= XHCI_LPM_SUPPORT;
@@ -172,7 +191,16 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	if (ret)
 		goto disable_usb_phy;
 
+	ret = xhci_create_debug_file(&pdev->dev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to initialize debugfs\n");
+		goto dealloc_usb3_hcd;
+	}
+
 	return 0;
+
+dealloc_usb3_hcd:
+	usb_remove_hcd(xhci->shared_hcd);
 
 disable_usb_phy:
 	usb_phy_shutdown(hcd->usb_phy);
@@ -198,6 +226,9 @@ static int xhci_plat_remove(struct platform_device *dev)
 	struct usb_hcd	*hcd = platform_get_drvdata(dev);
 	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
 	struct clk *clk = xhci->clk;
+
+	/* add for xhci debug */
+	xhci_remove_debug_file();
 
 	usb_remove_hcd(xhci->shared_hcd);
 	usb_phy_shutdown(hcd->usb_phy);

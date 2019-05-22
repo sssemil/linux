@@ -283,12 +283,16 @@ static int kvm_vm_ioctl_enable_cap(struct kvm *kvm, struct kvm_enable_cap *cap)
 		r = 0;
 		break;
 	case KVM_CAP_S390_VECTOR_REGISTERS:
-		if (MACHINE_HAS_VX) {
+		mutex_lock(&kvm->lock);
+		if (atomic_read(&kvm->online_vcpus)) {
+			r = -EBUSY;
+		} else if (MACHINE_HAS_VX) {
 			set_kvm_facility(kvm->arch.model.fac->mask, 129);
 			set_kvm_facility(kvm->arch.model.fac->list, 129);
 			r = 0;
 		} else
 			r = -EINVAL;
+		mutex_unlock(&kvm->lock);
 		break;
 	case KVM_CAP_S390_USER_STSI:
 		kvm->arch.user_stsi = 1;
@@ -1031,7 +1035,9 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	if (!kvm->arch.sca)
 		goto out_err;
 	spin_lock(&kvm_lock);
-	sca_offset = (sca_offset + 16) & 0x7f0;
+	sca_offset += 16;
+	if (sca_offset + sizeof(struct sca_block) > PAGE_SIZE)
+		sca_offset = 0;
 	kvm->arch.sca = (struct sca_block *) ((char *) kvm->arch.sca + sca_offset);
 	spin_unlock(&kvm_lock);
 
@@ -1993,12 +1999,14 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 		 * As PF_VCPU will be used in fault handler, between
 		 * guest_enter and guest_exit should be no uaccess.
 		 */
-		preempt_disable();
-		kvm_guest_enter();
-		preempt_enable();
+		local_irq_disable();
+		__kvm_guest_enter();
+		local_irq_enable();
 		exit_reason = sie64a(vcpu->arch.sie_block,
 				     vcpu->run->s.regs.gprs);
-		kvm_guest_exit();
+		local_irq_disable();
+		__kvm_guest_exit();
+		local_irq_enable();
 		vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
 
 		rc = vcpu_post_run(vcpu, exit_reason);
